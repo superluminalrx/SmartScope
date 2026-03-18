@@ -129,7 +129,8 @@ class DoppioPipelineForm(forms.Form):
 
     globus_compute_endpoint_id = forms.CharField(
         label='Globus Compute Endpoint',
-        help_text='UUID of the Globus Compute endpoint where Doppio will run.',
+        widget=forms.TextInput(attrs={'placeholder': 'Run: globus-compute-endpoint list (on HPC)'}),
+        help_text='UUID from "globus-compute-endpoint list" on the HPC.',
     )
 
     compute_function_id = forms.CharField(

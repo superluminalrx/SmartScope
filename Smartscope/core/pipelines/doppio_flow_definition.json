@@ -5,11 +5,12 @@
     "TransferToHPC": {
       "Comment": "Transfer frames + manifest from microscope DTN to HPC",
       "Type": "Action",
-      "ActionUrl": "https://actions.automate.globus.org/transfer/transfer",
+      "ActionUrl": "https://transfer.actions.globus.org/transfer",
+      "ActionScope": "urn:globus:auth:scope:transfer.api.globus.org:all",
       "Parameters": {
-        "source_endpoint_id.$": "$.input.source_collection",
-        "destination_endpoint_id.$": "$.input.destination_collection",
-        "transfer_items.$": "$.input.transfer_items",
+        "source_endpoint.$": "$.input.source_collection",
+        "destination_endpoint.$": "$.input.destination_collection",
+        "DATA.$": "$.input.transfer_items",
         "label.$": "$.input.label"
       },
       "ResultPath": "$.TransferToHPC",
@@ -17,12 +18,8 @@
     },
     "WaitForProcessing": {
       "Comment": "Wait for Doppio orchestrator to signal completion via resume API",
-      "Type": "Action",
-      "ActionUrl": "https://actions.automate.globus.org/wps/wait",
-      "Parameters": {
-        "max_wait_seconds": 86400
-      },
-      "ResultPath": "$.ProcessingResult",
+      "Type": "Wait",
+      "Seconds": 86400,
       "Next": "CheckProcessingStatus"
     },
     "CheckProcessingStatus": {
@@ -40,11 +37,12 @@
     "TransferResultsBack": {
       "Comment": "Transfer .done.json and processed results from HPC back to DTN",
       "Type": "Action",
-      "ActionUrl": "https://actions.automate.globus.org/transfer/transfer",
+      "ActionUrl": "https://transfer.actions.globus.org/transfer",
+      "ActionScope": "urn:globus:auth:scope:transfer.api.globus.org:all",
       "Parameters": {
-        "source_endpoint_id.$": "$.input.destination_collection",
-        "destination_endpoint_id.$": "$.input.source_collection",
-        "transfer_items.$": "$.input.return_transfer_items",
+        "source_endpoint.$": "$.input.destination_collection",
+        "destination_endpoint.$": "$.input.source_collection",
+        "DATA.$": "$.input.return_transfer_items",
         "label": "Doppio results -> SmartScope"
       },
       "ResultPath": "$.TransferBack",

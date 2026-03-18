@@ -52,6 +52,7 @@ class DoppioPipelineForm(forms.Form):
 
     globus_flow_id = forms.CharField(
         label='Globus Flow ID',
+        initial='ddffd8b0-81dd-4325-9383-ea16f411eaa8',
         help_text='UUID of the deployed Globus Flow (transfer -> compute -> transfer).',
     )
 

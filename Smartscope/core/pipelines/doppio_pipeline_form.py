@@ -1,6 +1,10 @@
 
 from django import forms
+import json
+import logging
+from pathlib import Path
 
+logger = logging.getLogger(__name__)
 
 # Fields that should only show when mode = "transfer_and_process"
 PROCESS_ONLY_FIELDS = {
@@ -11,6 +15,84 @@ PROCESS_ONLY_FIELDS = {
     'picking_threshold', 'picking_model',
     'extract_box_size', 'extract_downscale',
 }
+
+# Default token file and client ID
+DEFAULT_TOKEN_FILE = '/opt/config/smartscope_tokens.json'
+DEFAULT_CLIENT_ID = '7df9d534-fb19-4d79-8e83-642f1cdcf081'
+
+
+def _get_globus_choices():
+    """Query Globus APIs for available collections, flows, and compute endpoints.
+
+    Returns a dict of field_name -> [(value, label), ...] choices.
+    Falls back to empty lists if tokens are missing or API fails.
+    """
+    choices = {
+        'source_collection_id': [],
+        'destination_collection_id': [],
+        'globus_flow_id': [],
+        'globus_compute_endpoint_id': [],
+    }
+
+    try:
+        from globus_sdk import (
+            NativeAppAuthClient, TransferClient, FlowsClient,
+            RefreshTokenAuthorizer,
+        )
+
+        token_path = Path(DEFAULT_TOKEN_FILE)
+        if not token_path.exists():
+            return choices
+
+        tokens = json.loads(token_path.read_text())
+        auth_client = NativeAppAuthClient(DEFAULT_CLIENT_ID)
+
+        # Transfer collections
+        if 'transfer.api.globus.org' in tokens:
+            t = tokens['transfer.api.globus.org']
+            authorizer = RefreshTokenAuthorizer(
+                t['refresh_token'], auth_client,
+                access_token=t['access_token'],
+                expires_at=t['expires_at_seconds'],
+            )
+            tc = TransferClient(authorizer=authorizer)
+
+            collection_choices = []
+            for ep in tc.endpoint_search(filter_scope='my-endpoints'):
+                label = f"{ep['display_name']}  ({ep['id'][:8]}…)"
+                collection_choices.append((ep['id'], label))
+            # Also search recently used
+            for ep in tc.endpoint_search(filter_scope='recently-used'):
+                entry = (ep['id'], f"{ep['display_name']}  ({ep['id'][:8]}…)")
+                if entry not in collection_choices:
+                    collection_choices.append(entry)
+
+            choices['source_collection_id'] = collection_choices
+            choices['destination_collection_id'] = collection_choices
+
+        # Flows
+        if 'flows.globus.org' in tokens:
+            t = tokens['flows.globus.org']
+            authorizer = RefreshTokenAuthorizer(
+                t['refresh_token'], auth_client,
+                access_token=t['access_token'],
+                expires_at=t['expires_at_seconds'],
+            )
+            fc = FlowsClient(authorizer=authorizer)
+
+            flow_choices = []
+            for flow in fc.list_flows():
+                label = f"{flow['title']}  ({flow['id'][:8]}…)"
+                flow_choices.append((flow['id'], label))
+            choices['globus_flow_id'] = flow_choices
+
+        # Compute endpoints — would need globus-compute-sdk
+        # For now, leave as text input (user pastes UUID from HPC setup)
+
+    except Exception as e:
+        logger.warning(f'Could not fetch Globus choices: {e}')
+
+    return choices
 
 
 class DoppioPipelineForm(forms.Form):
@@ -43,7 +125,7 @@ class DoppioPipelineForm(forms.Form):
         help_text='How to batch images into Globus Flow runs.',
     )
 
-    # ===== Globus =====
+    # ===== Globus — these become dropdowns populated from the API =====
 
     globus_compute_endpoint_id = forms.CharField(
         label='Globus Compute Endpoint',
@@ -56,20 +138,22 @@ class DoppioPipelineForm(forms.Form):
         help_text='UUID of the registered Globus Compute function for Doppio processing.',
     )
 
-    globus_flow_id = forms.CharField(
-        label='Globus Flow ID',
-        initial='ddffd8b0-81dd-4325-9383-ea16f411eaa8',
-        help_text='UUID of the deployed Globus Flow (transfer -> compute -> transfer).',
+    globus_flow_id = forms.ChoiceField(
+        label='Globus Flow',
+        choices=[],
+        help_text='Select a deployed Globus Flow.',
     )
 
-    source_collection_id = forms.CharField(
+    source_collection_id = forms.ChoiceField(
         label='Source Collection',
-        help_text='Globus collection on the microscope side (e.g. MSU Talos Arctica).',
+        choices=[],
+        help_text='Globus collection on the microscope side.',
     )
 
-    destination_collection_id = forms.CharField(
+    destination_collection_id = forms.ChoiceField(
         label='Destination Collection',
-        help_text='Globus collection on the HPC side (e.g. Blackmore - Superluminal).',
+        choices=[],
+        help_text='Globus collection on the HPC side.',
     )
 
     source_base_path = forms.CharField(
@@ -130,7 +214,6 @@ class DoppioPipelineForm(forms.Form):
     )
 
     # ===== Processing Parameters =====
-    # pixel_size, voltage, Cs, gain_rot, gain_flip are auto-derived from microscope metadata
 
     pixel_size_override = forms.FloatField(
         label='Pixel size override (A/px)',
@@ -202,6 +285,13 @@ class DoppioPipelineForm(forms.Form):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
+
+        # Populate dynamic dropdown choices from Globus APIs
+        globus_choices = _get_globus_choices()
+        for field_name, field_choices in globus_choices.items():
+            if field_name in self.fields and field_choices:
+                self.fields[field_name].choices = [('', '— Select —')] + field_choices
+
         for visible in self.visible_fields():
             widget = visible.field.widget
             if isinstance(widget, forms.CheckboxInput):
@@ -213,4 +303,3 @@ class DoppioPipelineForm(forms.Form):
             # Tag processing-only fields so JS can toggle them
             if visible.name in PROCESS_ONLY_FIELDS:
                 widget.attrs['data-process-only'] = 'true'
-

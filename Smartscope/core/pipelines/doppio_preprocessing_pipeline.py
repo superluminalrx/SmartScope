@@ -267,8 +267,89 @@ class DoppioPreprocessingPipeline(PreprocessingPipeline):
         else:
             self._start_transfer_only(group_key, batch, file_pairs)
 
+    def _build_manifest(self, group_key: str, batch: List, file_pairs: List,
+                         flow_run_id: str = "") -> dict:
+        """Build a Doppio-side manifest for this batch.
+
+        The manifest tells Doppio's orchestrator (in SmartScope mode):
+        - What movies were transferred (relative to Doppio project dir)
+        - The flow_run_id to callback when processing is done
+        - Any metadata overrides (pixel size, voltage, etc.)
+        """
+        batch_id = f"{self.grid.grid_id}_{group_key}"
+
+        # Movie paths relative to the Doppio project root
+        dest_base = (f"{self.cmd_data.destination_base_path.rstrip('/')}/"
+                     f"{self.project_path.strip('/')}")
+        movies = []
+        for _, dst in file_pairs:
+            # dst is absolute on HPC, strip project base to get relative
+            if dst.startswith(dest_base):
+                movies.append(dst[len(dest_base):].lstrip('/'))
+            else:
+                movies.append(dst)
+
+        # Metadata overrides from microscope settings
+        metadata = {}
+        if self.cmd_data.pixel_size_override > 0:
+            metadata["pixel_size"] = self.cmd_data.pixel_size_override
+        elif hasattr(self.detector, 'pixel_size') and self.detector.pixel_size:
+            metadata["pixel_size"] = float(self.detector.pixel_size)
+        if hasattr(self.microscope, 'voltage') and self.microscope.voltage:
+            metadata["voltage"] = int(self.microscope.voltage)
+        if self.cmd_data.dose_per_frame > 0:
+            metadata["dose_per_frame"] = self.cmd_data.dose_per_frame
+
+        return {
+            "batch_id": batch_id,
+            "flow_run_id": flow_run_id,
+            "movies": movies,
+            "grid_id": self.grid.grid_id,
+            "metadata": metadata,
+        }
+
+    def _transfer_manifest(self, manifest: dict):
+        """Transfer the manifest JSON to the Doppio project's Manifests/ dir on HPC."""
+        from globus_sdk import TransferData
+        import tempfile
+
+        batch_id = manifest["batch_id"]
+        dest_base = (f"{self.cmd_data.destination_base_path.rstrip('/')}/"
+                     f"{self.project_path.strip('/')}")
+
+        # Write manifest to a temp file, then transfer it
+        manifest_json = json.dumps(manifest, indent=2)
+        local_path = Path(f"/tmp/smartscope_manifest_{batch_id}.json")
+        local_path.write_text(manifest_json)
+
+        # Transfer manifest via Globus — we need the source collection to see it
+        # Write to a shared path accessible from the source collection
+        src_manifest = _container_to_globus_path(
+            str(local_path), self.cmd_data.source_base_path
+        )
+        dst_manifest = (f"{dest_base}/LivePreprocess/job001/"
+                        f"Manifests/{batch_id}.json")
+
+        td = TransferData(
+            source_endpoint=self.cmd_data.source_collection_id,
+            destination_endpoint=self.cmd_data.destination_collection_id,
+            label=f'Manifest {batch_id}',
+        )
+        td.add_item(src_manifest, dst_manifest)
+
+        result = self.tc.submit_transfer(td)
+        logger.info(f'Manifest transfer submitted: {result["task_id"]} '
+                     f'for batch {batch_id}')
+
+        # Clean up local temp file
+        try:
+            local_path.unlink()
+        except OSError:
+            pass
+
     def _start_flow_run(self, group_key: str, batch: List, file_pairs: List):
-        """Start a Globus Flow run: transfer -> compute -> transfer back."""
+        """Start a Globus Flow run: transfer -> wait for Doppio -> transfer back."""
+        # We'll get the flow_run_id after starting the run, then send the manifest
         flow_input = {
             "source_collection": self.cmd_data.source_collection_id,
             "destination_collection": self.cmd_data.destination_collection_id,
@@ -282,8 +363,17 @@ class DoppioPreprocessingPipeline(PreprocessingPipeline):
         self._active_flow_runs[run_id] = {"batch": batch, "group_key": group_key}
         logger.info(f'Flow run started: {run_id} for group {group_key}')
 
+        # Write and transfer the manifest so Doppio knows about this batch
+        manifest = self._build_manifest(group_key, batch, file_pairs,
+                                         flow_run_id=run_id)
+        self._transfer_manifest(manifest)
+
     def _start_transfer_only(self, group_key: str, batch: List, file_pairs: List):
-        """Transfer-only mode: just move files to HPC."""
+        """Transfer-only mode: just move files to HPC.
+
+        Also writes a manifest so Doppio can pick them up later
+        if the user starts a Live job manually.
+        """
         from globus_sdk import TransferData
 
         td = TransferData(
@@ -298,6 +388,10 @@ class DoppioPreprocessingPipeline(PreprocessingPipeline):
         task_id = result['task_id']
         self._active_flow_runs[task_id] = {"batch": batch, "group_key": group_key, "transfer_only": True}
         logger.info(f'Transfer submitted: {task_id} for group {group_key}')
+
+        # Write manifest (no flow_run_id — no callback expected)
+        manifest = self._build_manifest(group_key, batch, file_pairs)
+        self._transfer_manifest(manifest)
 
     # ---- Flow run status ----
 
@@ -336,38 +430,73 @@ class DoppioPreprocessingPipeline(PreprocessingPipeline):
     # ---- DB updates ----
 
     def _update_db(self, batch: List, results: Dict):
-        """Parse Doppio output and update HighMagModel + HoleModel in DB."""
-        to_update = []
+        """Parse Doppio output and update HighMagModel + HoleModel in DB.
+
+        Results come from the Globus Flow completion payload, which contains
+        the .done.json written by Doppio's SmartScope mode. The 'results'
+        field is a list of per-micrograph dicts with CTF, motion, and
+        particle data.
+        """
+        from django.utils import timezone
+
+        # Index results by movie filename for matching to HighMagModels
+        result_list = results.get("results", [])
+        results_by_movie = {}
+        for r in result_list:
+            movie = r.get("movie", "")
+            # Key on filename stem (without extension or path)
+            stem = Path(movie).stem
+            results_by_movie[stem] = r
+
+        highmags_to_update = []
+        holes_to_update = []
 
         for hm in batch:
-            # TODO: Extract per-image results from Doppio output
-            # data = {
-            #     'defocus': ...,
-            #     'astig': ...,
-            #     'angast': ...,
-            #     'ctffit': ...,
-            #     'shape_x': ...,
-            #     'shape_y': ...,
-            #     'pixel_size': ...,
-            #     'status': 'completed',
-            # }
-            # to_update.append(update_fields(hm, data))
-            # to_update.append(update_fields(hm.hole_id, dict(status='completed')))
-            pass
+            # Match by filename stem
+            hm_stem = Path(str(hm.pk)).stem
+            mic_result = results_by_movie.get(hm_stem, {})
 
-        if to_update:
+            if not mic_result:
+                logger.warning(f"No Doppio result for {hm.pk}")
+                continue
+
+            defocus_u = mic_result.get("defocus_u", 0.0)
+            defocus_v = mic_result.get("defocus_v", 0.0)
+            defocus_avg = (defocus_u + defocus_v) / 2.0
+
+            hm.defocus = defocus_avg
+            hm.astig = abs(defocus_u - defocus_v)
+            hm.angast = mic_result.get("defocus_angle", 0.0)
+            hm.ctffit = mic_result.get("ctf_max_resolution", 999.0)
+            hm.ice_thickness = mic_result.get("ice_thickness", 0.0)
+            hm.status = 'completed'
+            hm.completion_time = timezone.now()
+            highmags_to_update.append(hm)
+
+            # Update parent hole status
+            if hm.hole_id:
+                hm.hole_id.status = 'completed'
+                hm.hole_id.completion_time = timezone.now()
+                holes_to_update.append(hm.hole_id)
+
+        if highmags_to_update or holes_to_update:
             with transaction.atomic():
-                highmags = [x for x in to_update if isinstance(x, HighMagModel)]
-                holes = [x for x in to_update if isinstance(x, HoleModel)]
-                HighMagModel.objects.bulk_update(
-                    highmags,
-                    fields=['status', 'shape_x', 'shape_y', 'pixel_size',
-                            'defocus', 'astig', 'angast', 'ctffit',
-                            'tilt_angle', 'tilt_axis_angle', 'ice_thickness',
-                            'completion_time']
-                )
-                HoleModel.objects.bulk_update(holes, fields=['status', 'completion_time'])
-            websocket_update(to_update, self.grid.grid_id)
+                if highmags_to_update:
+                    HighMagModel.objects.bulk_update(
+                        highmags_to_update,
+                        fields=['status', 'defocus', 'astig', 'angast', 'ctffit',
+                                'ice_thickness', 'completion_time']
+                    )
+                if holes_to_update:
+                    HoleModel.objects.bulk_update(
+                        holes_to_update,
+                        fields=['status', 'completion_time']
+                    )
+
+            all_updated = highmags_to_update + holes_to_update
+            websocket_update(all_updated, self.grid.grid_id)
+            logger.info(f"Updated {len(highmags_to_update)} high-mag images, "
+                         f"{len(holes_to_update)} holes")
 
     def check_for_update(self, instance):
         pass  # Handled by _update_db

@@ -9,6 +9,7 @@ from typing import Dict, List, Set
 from django.db import transaction
 
 from Smartscope.core.db_manipulations import websocket_update
+from Smartscope.core.frames import get_smartscope_frames_dir
 from Smartscope.core.models.grid import AutoloaderGrid
 from Smartscope.core.models.high_mag import HighMagModel
 from Smartscope.core.models.hole import HoleModel
@@ -141,6 +142,9 @@ class DoppioPreprocessingPipeline(PreprocessingPipeline):
         if self.grid_position:
             self.project_path = self.cmd_data.get_project_for_slot(self.grid_position)
 
+        # Frames directory for this grid (where SerialEM writes .tif/.mrc files)
+        self.frames_dir = get_smartscope_frames_dir(self.grid)
+
         self._stop = threading.Event()
         self._submitted_groups: Set[str] = set()  # track submitted grouping keys
         self._active_flow_runs: Dict[str, dict] = {}  # flow_run_id -> {batch, group_key}
@@ -249,13 +253,14 @@ class DoppioPreprocessingPipeline(PreprocessingPipeline):
         logger.info(f'Submitting group {group_key}: {len(batch)} images')
         self._submitted_groups.add(group_key)
 
-        # Build file list
+        # Build file list from actual frame paths
         file_pairs = []
         for hm in batch:
-            # TODO: Get the actual frame file path from the HighMagModel
-            # container_path = hm.get_frame_path() or similar
-            # For now, placeholder:
-            container_path = f"{CONTAINER_DATA_ROOT}/{hm.pk}"
+            if not hm.frames:
+                logger.warning(f'No frames file for {hm.pk}, skipping')
+                continue
+            # Full container path to the frame file
+            container_path = str(self.frames_dir / hm.frames)
 
             src = _container_to_globus_path(container_path, self.cmd_data.source_base_path)
             dst = _globus_dest_path(container_path, self.cmd_data.destination_base_path,
@@ -311,19 +316,17 @@ class DoppioPreprocessingPipeline(PreprocessingPipeline):
     def _transfer_manifest(self, manifest: dict):
         """Transfer the manifest JSON to the Doppio project's Manifests/ dir on HPC."""
         from globus_sdk import TransferData
-        import tempfile
 
         batch_id = manifest["batch_id"]
         dest_base = (f"{self.cmd_data.destination_base_path.rstrip('/')}/"
                      f"{self.project_path.strip('/')}")
 
-        # Write manifest to a temp file, then transfer it
-        manifest_json = json.dumps(manifest, indent=2)
-        local_path = Path(f"/tmp/smartscope_manifest_{batch_id}.json")
-        local_path.write_text(manifest_json)
+        # Write manifest to the grid's data directory (which is on the source collection)
+        manifests_dir = Path(self.grid.directory) / "manifests"
+        manifests_dir.mkdir(parents=True, exist_ok=True)
+        local_path = manifests_dir / f"{batch_id}.json"
+        local_path.write_text(json.dumps(manifest, indent=2))
 
-        # Transfer manifest via Globus — we need the source collection to see it
-        # Write to a shared path accessible from the source collection
         src_manifest = _container_to_globus_path(
             str(local_path), self.cmd_data.source_base_path
         )
@@ -340,12 +343,6 @@ class DoppioPreprocessingPipeline(PreprocessingPipeline):
         result = self.tc.submit_transfer(td)
         logger.info(f'Manifest transfer submitted: {result["task_id"]} '
                      f'for batch {batch_id}')
-
-        # Clean up local temp file
-        try:
-            local_path.unlink()
-        except OSError:
-            pass
 
     def _start_flow_run(self, group_key: str, batch: List, file_pairs: List):
         """Start a Globus Flow run: transfer -> wait for Doppio -> transfer back."""

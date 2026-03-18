@@ -58,6 +58,7 @@ class DoppioCmdKwargs(BaseModel):
     motioncor_binning: float = 1.0
     motioncor_patches: int = 5
     picking_threshold: float = 0.3
+    picking_model: str = ""  # path to crYOLO model on HPC, empty = general model
     extract_box_size: int = 256
     extract_downscale: int = 1
 

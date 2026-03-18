@@ -140,6 +140,11 @@ class DoppioPipelineForm(forms.Form):
         help_text='Confidence threshold for particle picking (0-1).',
     )
 
+    picking_model = forms.CharField(
+        label='Picking model path',
+        help_text='Path to crYOLO model on HPC (supports glob). Empty = use general model.',
+    )
+
     extract_box_size = forms.IntegerField(
         label='Extraction box size (px)',
         initial=256,

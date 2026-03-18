@@ -1,4 +1,5 @@
 
+import json
 import logging
 import threading
 import time
@@ -19,12 +20,108 @@ from .doppio_pipeline_form import DoppioPipelineForm
 
 logger = logging.getLogger(__name__)
 
+TRANSFER_SCOPE = "urn:globus:auth:scope:transfer.api.globus.org:all"
+FLOWS_SCOPE = "https://auth.globus.org/scopes/eec9b274-0c81-4334-bdc2-54e90e689b9e/flow_user"
+
+# Container data mount — strip this prefix when building Globus paths
+CONTAINER_DATA_ROOT = "/mnt/data"
+
+
+# ---- Globus Auth Helpers ----
+
+def _load_tokens(token_file: str) -> dict:
+    path = Path(token_file).expanduser()
+    if not path.exists():
+        raise FileNotFoundError(
+            f"No cached Globus tokens at {path}. "
+            f"Run: python globus_login.py get-url && python globus_login.py exchange <code>"
+        )
+    return json.loads(path.read_text())
+
+
+def _save_tokens(token_file: str, tokens: dict):
+    path = Path(token_file).expanduser()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(tokens, indent=2))
+    path.chmod(0o600)
+
+
+def _build_transfer_client(cmd_data: DoppioCmdKwargs):
+    from globus_sdk import NativeAppAuthClient, TransferClient, RefreshTokenAuthorizer
+
+    tokens = _load_tokens(cmd_data.token_file)
+    transfer_tokens = tokens["transfer.api.globus.org"]
+
+    auth_client = NativeAppAuthClient(cmd_data.globus_client_id)
+    authorizer = RefreshTokenAuthorizer(
+        transfer_tokens["refresh_token"],
+        auth_client,
+        access_token=transfer_tokens["access_token"],
+        expires_at=transfer_tokens["expires_at_seconds"],
+        on_refresh=lambda td: _save_tokens(cmd_data.token_file, {
+            **_load_tokens(cmd_data.token_file),
+            "transfer.api.globus.org": td.by_resource_server["transfer.api.globus.org"],
+        }),
+    )
+    return TransferClient(authorizer=authorizer)
+
+
+def _build_flows_client(cmd_data: DoppioCmdKwargs):
+    """Build a Globus Flows client (SpecificFlowClient) for running flows."""
+    from globus_sdk import NativeAppAuthClient, SpecificFlowClient, RefreshTokenAuthorizer
+
+    tokens = _load_tokens(cmd_data.token_file)
+    # TODO: Flows tokens may be under a different resource server key
+    # depending on how scopes were requested at login time
+    flow_tokens = tokens.get("flows.globus.org", tokens.get("transfer.api.globus.org"))
+
+    auth_client = NativeAppAuthClient(cmd_data.globus_client_id)
+    authorizer = RefreshTokenAuthorizer(
+        flow_tokens["refresh_token"],
+        auth_client,
+        access_token=flow_tokens["access_token"],
+        expires_at=flow_tokens["expires_at_seconds"],
+    )
+    return SpecificFlowClient(cmd_data.globus_flow_id, authorizer=authorizer)
+
+
+# ---- Path Mapping ----
+
+def _container_to_globus_path(container_path: str, source_base_path: str) -> str:
+    """Convert a container path to a Globus collection path.
+
+    e.g. /mnt/data/Superluminal/session/movies/frame.tif
+      -> /SmartScope/Superluminal/session/movies/frame.tif
+    """
+    rel = container_path
+    if rel.startswith(CONTAINER_DATA_ROOT):
+        rel = rel[len(CONTAINER_DATA_ROOT):]
+    return f"{source_base_path.rstrip('/')}/{rel.lstrip('/')}"
+
+
+def _globus_dest_path(container_path: str, destination_base_path: str,
+                      project_path: str, grid_id: str) -> str:
+    """Build destination path on HPC.
+
+    e.g. /data/programs/Lodos/Apoferritin/Movies/grid_1/frame.tif
+
+    Args:
+        container_path: Frame path inside container (e.g. /mnt/data/.../frame.tif)
+        destination_base_path: HPC root (e.g. /data/programs)
+        project_path: User-defined project path from slot mapping (e.g. Lodos/Apoferritin)
+        grid_id: Grid identifier for subdirectory
+    """
+    filename = Path(container_path).name
+    return (f"{destination_base_path.rstrip('/')}/"
+            f"{project_path.strip('/')}/"
+            f"Movies/{grid_id}/{filename}")
+
 
 class DoppioPreprocessingPipeline(PreprocessingPipeline):
 
     verbose_name = 'Doppio Preprocessing Pipeline (Globus)'
     name = 'doppioPipeline'
-    description = 'GPU preprocessing via Globus Compute + Transfer to HPC running Doppio.'
+    description = 'GPU preprocessing via Globus Flows to transfer and process on HPC with Doppio.'
 
     cmdkwargs_handler = DoppioCmdKwargs
     pipeline_form = DoppioPipelineForm
@@ -38,69 +135,102 @@ class DoppioPreprocessingPipeline(PreprocessingPipeline):
         self.detector = self.grid.session_id.detector_id
         self.cmd_data = self.cmdkwargs_handler.parse_obj(cmd_data)
 
+        # Resolve this grid's Doppio project from slot mapping
+        self.grid_position = getattr(self.grid, 'position', None)
+        self.project_path = ""
+        if self.grid_position:
+            self.project_path = self.cmd_data.get_project_for_slot(self.grid_position)
+
         self._stop = threading.Event()
-        self._submitted: Set[str] = set()
-        self._pending_transfers: Dict[str, List] = {}   # transfer_task_id → batch
-        self._pending_compute: Dict[str, List] = {}     # compute_task_id → batch
+        self._submitted_groups: Set[str] = set()  # track submitted grouping keys
+        self._active_flow_runs: Dict[str, dict] = {}  # flow_run_id -> {batch, group_key}
 
-        self.tc = None   # globus_sdk.TransferClient
-        self.gcc = None  # globus_compute_sdk.Executor
+        self.tc = None       # TransferClient (for transfer_only mode)
+        self.fc = None       # SpecificFlowClient (for transfer_and_process mode)
 
-    # ---- Globus client initialization ----
+    # ---- Init ----
 
     def _init_globus_clients(self):
-        """Initialize Globus Transfer and Compute clients from credentials."""
-        from globus_sdk import ConfidentialAppAuthClient, TransferClient, ClientCredentialsAuthorizer
-        from globus_compute_sdk import Executor
+        self.tc = _build_transfer_client(self.cmd_data)
+        logger.info("Globus Transfer client initialized")
 
-        secret = Path(self.cmd_data.globus_client_secret_file).read_text().strip()
-        auth_client = ConfidentialAppAuthClient(self.cmd_data.globus_client_id, secret)
+        if self.cmd_data.mode == 'transfer_and_process' and self.cmd_data.globus_flow_id:
+            try:
+                self.fc = _build_flows_client(self.cmd_data)
+                logger.info("Globus Flows client initialized")
+            except Exception as e:
+                logger.warning(f"Could not init Flows client: {e}. Falling back to transfer_only.")
 
-        # Transfer client
-        transfer_scope = "urn:globus:auth:scope:transfer.api.globus.org:all"
-        cc_authorizer = ClientCredentialsAuthorizer(auth_client, transfer_scope)
-        self.tc = TransferClient(authorizer=cc_authorizer)
+    # ---- Grouping Logic ----
 
-        # Compute client
-        self.gcc = Executor(
-            endpoint_id=self.cmd_data.globus_compute_endpoint_id,
-            funcx_client_id=self.cmd_data.globus_client_id,
-            funcx_client_secret=secret,
-        )
+    def _group_key(self, hm: HighMagModel) -> str:
+        """Return a grouping key for a HighMagModel based on the configured grouping."""
+        if self.cmd_data.grouping == 'per_micrograph':
+            return str(hm.pk)
+        elif self.cmd_data.grouping == 'per_group':
+            # BIS group: all holes sharing the same group identifier
+            return str(getattr(hm, 'bis_group', hm.pk))
+        elif self.cmd_data.grouping == 'per_square':
+            # All holes in the same square
+            return str(hm.hole_id.square_id.pk) if hm.hole_id else str(hm.pk)
+        return str(hm.pk)
+
+    def _group_is_complete(self, group_key: str, group_items: List) -> bool:
+        """Check if all items in a group have been acquired (ready to submit)."""
+        if self.cmd_data.grouping == 'per_micrograph':
+            return True  # always ready
+        # For per_group and per_square, check if all expected items are acquired
+        # TODO: Compare against expected count from parent model
+        return all(hm.status == 'acquired' for hm in group_items)
+
+    def _build_groups(self) -> Dict[str, List]:
+        """Group incomplete processes by grouping key."""
+        groups = {}
+        for hm in self.incomplete_processes:
+            key = self._group_key(hm)
+            groups.setdefault(key, []).append(hm)
+        return groups
 
     # ---- Main loop ----
 
     def start(self):
-        logger.info(f'Starting Doppio preprocessing pipeline in mode: {self.cmd_data.mode}')
+        if not self.project_path:
+            logger.info(f'Grid {self.grid.grid_id} (slot {self.grid_position}): '
+                        f'no Doppio project assigned, skipping.')
+            return
+
+        logger.info(f'Starting Doppio pipeline: mode={self.cmd_data.mode}, '
+                     f'grouping={self.cmd_data.grouping}, '
+                     f'project={self.project_path}, grid={self.grid.grid_id}')
         self._init_globus_clients()
 
         while not self._stop.is_set() and not self.is_stop_file():
             self.list_incomplete_processes()
 
-            # Batch and submit new work
-            unsubmitted = [p for p in self.incomplete_processes if p.pk not in self._submitted]
-            if unsubmitted:
-                batch = unsubmitted[:self.cmd_data.batch_size]
-                self._submit_batch(batch)
+            # Group and submit ready batches
+            groups = self._build_groups()
+            for group_key, batch in groups.items():
+                if group_key in self._submitted_groups:
+                    continue
+                if self._group_is_complete(group_key, batch):
+                    self._submit_group(group_key, batch)
 
-            # Poll for completions
-            self._poll_pending_transfers()
-            self._poll_pending_compute()
+            # Check for completed flow runs
+            self._check_flow_runs()
 
-            # Check if we're done
+            # Done?
             self.grid.refresh_from_db()
             if self._is_done():
                 logger.info('All images processed. Exiting.')
                 break
 
-            time.sleep(self.cmd_data.poll_interval)
+            time.sleep(5)  # brief sleep between loop iterations
 
     def _is_done(self):
         return (
             self.grid.status in ['complete', 'error']
-            and len(self._pending_transfers) == 0
-            and len(self._pending_compute) == 0
-            and not any(p.status == 'acquired' for p in self.incomplete_processes)
+            and len(self._active_flow_runs) == 0
+            and not self.incomplete_processes
         )
 
     # ---- Process listing ----
@@ -112,112 +242,96 @@ class DoppioPreprocessingPipeline(PreprocessingPipeline):
             .order_by('status', 'completion_time')
         )
 
-    # ---- Batch submission ----
+    # ---- Submission ----
 
-    def _submit_batch(self, batch: List):
-        """Transfer frames to HPC, optionally submit Doppio compute job."""
-        logger.info(f'Submitting batch of {len(batch)} images')
-        self._submitted.update(p.pk for p in batch)
+    def _submit_group(self, group_key: str, batch: List):
+        """Submit a group of images as a Globus Flow run (or transfer-only)."""
+        logger.info(f'Submitting group {group_key}: {len(batch)} images')
+        self._submitted_groups.add(group_key)
 
-        task_id = self._transfer_to_hpc(batch)
-        self._pending_transfers[task_id] = batch
+        # Build file list
+        file_pairs = []
+        for hm in batch:
+            # TODO: Get the actual frame file path from the HighMagModel
+            # container_path = hm.get_frame_path() or similar
+            # For now, placeholder:
+            container_path = f"{CONTAINER_DATA_ROOT}/{hm.pk}"
 
-    # ---- Globus Transfer: to HPC ----
+            src = _container_to_globus_path(container_path, self.cmd_data.source_base_path)
+            dst = _globus_dest_path(container_path, self.cmd_data.destination_base_path,
+                                    self.project_path, self.grid.grid_id)
+            file_pairs.append((src, dst))
 
-    def _transfer_to_hpc(self, batch: List) -> str:
-        """Submit a Globus Transfer task to move frames to HPC. Returns task_id."""
+        if self.cmd_data.mode == 'transfer_and_process' and self.fc:
+            self._start_flow_run(group_key, batch, file_pairs)
+        else:
+            self._start_transfer_only(group_key, batch, file_pairs)
+
+    def _start_flow_run(self, group_key: str, batch: List, file_pairs: List):
+        """Start a Globus Flow run: transfer -> compute -> transfer back."""
+        flow_input = {
+            "source_collection": self.cmd_data.source_collection_id,
+            "destination_collection": self.cmd_data.destination_collection_id,
+            "compute_endpoint": self.cmd_data.globus_compute_endpoint_id,
+            "transfer_items": [{"source": s, "destination": d} for s, d in file_pairs],
+            "label": f"SmartScope {self.grid.grid_id} group {group_key}",
+        }
+
+        run = self.fc.run_flow(body={"input": flow_input})
+        run_id = run["run_id"]
+        self._active_flow_runs[run_id] = {"batch": batch, "group_key": group_key}
+        logger.info(f'Flow run started: {run_id} for group {group_key}')
+
+    def _start_transfer_only(self, group_key: str, batch: List, file_pairs: List):
+        """Transfer-only mode: just move files to HPC."""
         from globus_sdk import TransferData
 
-        transfer_data = TransferData(
-            self.tc,
-            self.cmd_data.source_collection_id,
-            self.cmd_data.destination_collection_id,
-            label=f'SmartScope→HPC {self.grid.grid_id}',
+        td = TransferData(
+            source_endpoint=self.cmd_data.source_collection_id,
+            destination_endpoint=self.cmd_data.destination_collection_id,
+            label=f'SmartScope->HPC {self.grid.grid_id} group {group_key}',
         )
+        for src, dst in file_pairs:
+            td.add_item(src, dst)
 
-        for hm in batch:
-            source_path = self._source_path_for(hm)
-            dest_path = self._dest_path_for(hm)
-            transfer_data.add_item(source_path, dest_path)
-
-        result = self.tc.submit_transfer(transfer_data)
+        result = self.tc.submit_transfer(td)
         task_id = result['task_id']
-        logger.info(f'Globus Transfer submitted: {task_id}')
-        return task_id
+        self._active_flow_runs[task_id] = {"batch": batch, "group_key": group_key, "transfer_only": True}
+        logger.info(f'Transfer submitted: {task_id} for group {group_key}')
 
-    def _source_path_for(self, hm: HighMagModel) -> str:
-        """Build the source path for a HighMagModel's frames on the local collection."""
-        # TODO: Resolve actual frame file path from hm.frames and frames_directory
-        raise NotImplementedError
+    # ---- Flow run status ----
 
-    def _dest_path_for(self, hm: HighMagModel) -> str:
-        """Build the destination path for a HighMagModel's frames on the HPC collection."""
-        # TODO: Map to destination_base_path / grid_id / frame_filename
-        raise NotImplementedError
+    def _check_flow_runs(self):
+        """Check status of active flow runs / transfers."""
+        for run_id, info in list(self._active_flow_runs.items()):
+            if info.get("transfer_only"):
+                self._check_transfer(run_id, info)
+            else:
+                self._check_flow(run_id, info)
 
-    # ---- Globus Transfer: from HPC ----
+    def _check_transfer(self, task_id: str, info: dict):
+        task = self.tc.get_task(task_id)
+        if task['status'] == 'SUCCEEDED':
+            logger.info(f'Transfer {task_id} completed for group {info["group_key"]}')
+            del self._active_flow_runs[task_id]
+        elif task['status'] == 'FAILED':
+            logger.error(f'Transfer {task_id} failed: {task.get("nice_status_details", "")}')
+            del self._active_flow_runs[task_id]
+            self._submitted_groups.discard(info["group_key"])
 
-    def _transfer_from_hpc(self, batch: List, result_paths: Dict) -> str:
-        """Transfer Doppio results back from HPC. Returns task_id."""
-        from globus_sdk import TransferData
+    def _check_flow(self, run_id: str, info: dict):
+        run = self.fc.get_run(run_id)
+        status = run["status"]
 
-        transfer_data = TransferData(
-            self.tc,
-            self.cmd_data.destination_collection_id,
-            self.cmd_data.source_collection_id,
-            label=f'HPC→SmartScope {self.grid.grid_id}',
-        )
+        if status == "SUCCEEDED":
+            logger.info(f'Flow run {run_id} completed for group {info["group_key"]}')
+            self._update_db(info["batch"], run.get("details", {}))
+            del self._active_flow_runs[run_id]
 
-        for hm in batch:
-            # TODO: Map result files (motion-corrected avg, CTF) to local paths
-            pass
-
-        result = self.tc.submit_transfer(transfer_data)
-        task_id = result['task_id']
-        logger.info(f'Globus Transfer (results) submitted: {task_id}')
-        return task_id
-
-    # ---- Globus Compute: Doppio job ----
-
-    def _submit_doppio_job(self, batch: List) -> str:
-        """Submit a Doppio processing job via Globus Compute. Returns task_id."""
-        # TODO: Define the function to submit and the input payload
-        # The function should:
-        #   - Take a path to frames on HPC
-        #   - Run Doppio processing (motion correction, CTF estimation)
-        #   - Return a dict of results or a path to output files
-        raise NotImplementedError
-
-    # ---- Polling ----
-
-    def _poll_pending_transfers(self):
-        """Check status of pending Globus Transfer tasks."""
-        for task_id, batch in list(self._pending_transfers.items()):
-            task = self.tc.get_task(task_id)
-            if task['status'] == 'SUCCEEDED':
-                logger.info(f'Transfer {task_id} completed')
-                del self._pending_transfers[task_id]
-
-                if self.cmd_data.mode == 'transfer_and_process':
-                    compute_id = self._submit_doppio_job(batch)
-                    self._pending_compute[compute_id] = batch
-
-            elif task['status'] == 'FAILED':
-                logger.error(f'Transfer {task_id} failed: {task.get("nice_status_details", "")}')
-                del self._pending_transfers[task_id]
-                # Allow retry on next loop
-                self._submitted -= {p.pk for p in batch}
-
-    def _poll_pending_compute(self):
-        """Check status of pending Globus Compute tasks."""
-        for task_id, batch in list(self._pending_compute.items()):
-            # TODO: Check task status via Globus Compute SDK
-            # On success:
-            #   result = self.gcc.get_result(task_id)
-            #   self._transfer_from_hpc(batch, result)
-            #   self._update_db(batch, result)
-            #   del self._pending_compute[task_id]
-            pass
+        elif status in ("FAILED", "CANCELLED"):
+            logger.error(f'Flow run {run_id} {status} for group {info["group_key"]}')
+            del self._active_flow_runs[run_id]
+            self._submitted_groups.discard(info["group_key"])
 
     # ---- DB updates ----
 
@@ -263,6 +377,17 @@ class DoppioPreprocessingPipeline(PreprocessingPipeline):
     def stop(self):
         logger.info('Stopping Doppio preprocessing pipeline')
         self._stop.set()
-        # TODO: Cancel pending Globus transfers and compute tasks
-        if self.gcc:
-            self.gcc.shutdown()
+
+
+# ---- CLI entry point for login ----
+
+if __name__ == "__main__":
+    import sys
+    if len(sys.argv) > 1 and sys.argv[1] == "login":
+        client_id = sys.argv[2] if len(sys.argv) > 2 else "7df9d534-fb19-4d79-8e83-642f1cdcf081"
+        token_file = sys.argv[3] if len(sys.argv) > 3 else "/opt/config/smartscope_tokens.json"
+        from doppio_cmd_kwargs import DoppioCmdKwargs  # noqa
+        # Inline login — see globus_login.py for the two-phase flow
+        print("Use globus_login.py for interactive login.")
+    else:
+        print("Usage: python -m Smartscope.core.pipelines.doppio_preprocessing_pipeline login")

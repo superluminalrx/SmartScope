@@ -72,9 +72,12 @@ def _build_flows_client(cmd_data: DoppioCmdKwargs):
     from globus_sdk import NativeAppAuthClient, SpecificFlowClient, RefreshTokenAuthorizer
 
     tokens = _load_tokens(cmd_data.token_file)
-    # TODO: Flows tokens may be under a different resource server key
-    # depending on how scopes were requested at login time
-    flow_tokens = tokens.get("flows.globus.org", tokens.get("transfer.api.globus.org"))
+    # The flow-specific scope tokens are keyed by the flow's UUID.
+    # Fall back to flows.globus.org if flow-specific tokens aren't available.
+    flow_tokens = tokens.get(
+        cmd_data.globus_flow_id,
+        tokens.get("flows.globus.org", tokens.get("transfer.api.globus.org"))
+    )
 
     auth_client = NativeAppAuthClient(cmd_data.globus_client_id)
     authorizer = RefreshTokenAuthorizer(
@@ -208,8 +211,10 @@ class DoppioPreprocessingPipeline(PreprocessingPipeline):
                      f'project={self.project_path}, grid={self.grid.grid_id}')
         self._init_globus_clients()
 
+        logger.info(f'Entering main loop. Stop={self._stop.is_set()}, stop_file={self.is_stop_file()}')
         while not self._stop.is_set() and not self.is_stop_file():
             self.list_incomplete_processes()
+            logger.debug(f'Incomplete: {len(self.incomplete_processes)} images')
 
             # Group and submit ready batches
             groups = self._build_groups()

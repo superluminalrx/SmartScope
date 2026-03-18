@@ -4,7 +4,7 @@ from django import forms
 
 # Fields that should only show when mode = "transfer_and_process"
 PROCESS_ONLY_FIELDS = {
-    'grouping', 'globus_compute_endpoint_id', 'globus_flow_id',
+    'grouping', 'globus_compute_endpoint_id', 'compute_function_id', 'globus_flow_id',
     'do_motioncor', 'do_ctf', 'do_miffi', 'do_picking', 'do_extraction',
     'pixel_size_override', 'dose_per_frame', 'box_size',
     'motioncor_binning', 'motioncor_patches',
@@ -48,6 +48,12 @@ class DoppioPipelineForm(forms.Form):
     globus_compute_endpoint_id = forms.CharField(
         label='Globus Compute Endpoint',
         help_text='UUID of the Globus Compute endpoint where Doppio will run.',
+    )
+
+    compute_function_id = forms.CharField(
+        label='Compute Function ID',
+        initial='62937010-4730-4ecc-8840-e198a91672d9',
+        help_text='UUID of the registered Globus Compute function for Doppio processing.',
     )
 
     globus_flow_id = forms.CharField(

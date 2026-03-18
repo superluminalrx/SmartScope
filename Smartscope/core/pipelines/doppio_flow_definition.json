@@ -1,5 +1,5 @@
 {
-  "Comment": "SmartScope -> Doppio preprocessing flow. Transfer frames to HPC, wait for Doppio to process, transfer results back.",
+  "Comment": "SmartScope -> Doppio preprocessing flow. Transfer frames to HPC, run Doppio Live via Globus Compute, transfer results back.",
   "StartAt": "TransferToHPC",
   "States": {
     "TransferToHPC": {
@@ -14,28 +14,23 @@
         "label.$": "$.input.label"
       },
       "ResultPath": "$.TransferToHPC",
-      "Next": "WaitForProcessing"
+      "Next": "RunDoppio"
     },
-    "WaitForProcessing": {
-      "Comment": "Wait for Doppio orchestrator to signal completion via resume API",
-      "Type": "Wait",
-      "Seconds": 86400,
-      "Next": "CheckProcessingStatus"
-    },
-    "CheckProcessingStatus": {
-      "Comment": "Check if processing succeeded before transferring results back",
-      "Type": "Choice",
-      "Choices": [
-        {
-          "Variable": "$.ProcessingResult.details.status",
-          "StringEquals": "completed",
-          "Next": "TransferResultsBack"
-        }
-      ],
-      "Default": "ProcessingFailed"
+    "RunDoppio": {
+      "Comment": "Run Doppio Live processing via Globus Compute on HPC",
+      "Type": "Action",
+      "ActionUrl": "https://compute.actions.globus.org/v2",
+      "ActionScope": "https://auth.globus.org/scopes/facd7ccc-c5f4-42aa-916b-a0e270e2c2a9/all",
+      "Parameters": {
+        "endpoint.$": "$.input.compute_endpoint",
+        "function.$": "$.input.compute_function_id",
+        "kwargs.$": "$.input.compute_kwargs"
+      },
+      "ResultPath": "$.ComputeResult",
+      "Next": "TransferResultsBack"
     },
     "TransferResultsBack": {
-      "Comment": "Transfer .done.json and processed results from HPC back to DTN",
+      "Comment": "Transfer processed results from HPC back to DTN",
       "Type": "Action",
       "ActionUrl": "https://transfer.actions.globus.org/transfer",
       "ActionScope": "urn:globus:auth:scope:transfer.api.globus.org:all",
@@ -47,12 +42,6 @@
       },
       "ResultPath": "$.TransferBack",
       "End": true
-    },
-    "ProcessingFailed": {
-      "Comment": "Processing failed — end without return transfer",
-      "Type": "Fail",
-      "Error": "DoppioProcessingFailed",
-      "Cause": "Doppio processing did not complete successfully"
     }
   }
 }

@@ -347,11 +347,24 @@ class DoppioPreprocessingPipeline(PreprocessingPipeline):
     def _start_flow_run(self, group_key: str, batch: List, file_pairs: List):
         """Start a Globus Flow run: transfer -> wait for Doppio -> transfer back."""
         # We'll get the flow_run_id after starting the run, then send the manifest
+        # Build the project dir path on HPC for the compute function
+        dest_project_dir = (f"{self.cmd_data.destination_base_path.rstrip('/')}/"
+                            f"{self.project_path.strip('/')}")
+        batch_id = f"{self.grid.grid_id}_{group_key}"
+        manifest_path_on_hpc = (f"{dest_project_dir}/LivePreprocess/job001/"
+                                f"Manifests/{batch_id}.json")
+
         flow_input = {
             "source_collection": self.cmd_data.source_collection_id,
             "destination_collection": self.cmd_data.destination_collection_id,
             "compute_endpoint": self.cmd_data.globus_compute_endpoint_id,
-            "transfer_items": [{"source": s, "destination": d} for s, d in file_pairs],
+            "compute_function_id": self.cmd_data.compute_function_id,
+            "compute_kwargs": {
+                "manifest_path": manifest_path_on_hpc,
+                "project_dir": dest_project_dir,
+            },
+            "transfer_items": [{"source_path": s, "destination_path": d} for s, d in file_pairs],
+            "return_transfer_items": [],  # populated after compute completes
             "label": f"SmartScope {self.grid.grid_id} group {group_key}",
         }
 

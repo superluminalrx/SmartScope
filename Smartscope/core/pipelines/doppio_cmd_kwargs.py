@@ -30,7 +30,8 @@ class DoppioCmdKwargs(BaseModel):
 
     # Path mapping
     source_base_path: str = ""
-    destination_base_path: str = ""
+    destination_base_path: str = ""  # Globus collection path, e.g. "/CryoEM/Projects"
+    destination_filesystem_root: str = ""  # HPC filesystem mount, e.g. "/mnt/blackmore/ext-superluminal"
 
     # ===== Slot-to-project mapping (autoloader positions 1-12) =====
     slot_1: str = ""

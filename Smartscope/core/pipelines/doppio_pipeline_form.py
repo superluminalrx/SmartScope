@@ -164,8 +164,13 @@ class DoppioPipelineForm(forms.Form):
     )
 
     destination_base_path = forms.CharField(
-        label='Destination Base Path',
-        help_text='Root on HPC where Doppio projects live, e.g. "/data/programs".',
+        label='Destination Base Path (Globus)',
+        help_text='Globus collection path for Doppio projects, e.g. "/CryoEM/Projects".',
+    )
+
+    destination_filesystem_root = forms.CharField(
+        label='Destination Filesystem Root (HPC)',
+        help_text='HPC filesystem mount point for the Globus collection root, e.g. "/mnt/blackmore/ext-superluminal".',
     )
 
     # ===== Slot-to-Project Mapping =====

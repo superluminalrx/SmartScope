@@ -24,8 +24,6 @@ logger = logging.getLogger(__name__)
 TRANSFER_SCOPE = "urn:globus:auth:scope:transfer.api.globus.org:all"
 FLOWS_SCOPE = "https://auth.globus.org/scopes/eec9b274-0c81-4334-bdc2-54e90e689b9e/flow_user"
 
-# Container data mount — strip this prefix when building Globus paths
-CONTAINER_DATA_ROOT = "/mnt/data"
 
 
 # ---- Globus Auth Helpers ----
@@ -91,15 +89,19 @@ def _build_flows_client(cmd_data: DoppioCmdKwargs):
 
 # ---- Path Mapping ----
 
-def _container_to_globus_path(container_path: str, source_base_path: str) -> str:
+def _container_to_globus_path(container_path: str, source_base_path: str,
+                              container_root: str = "") -> str:
     """Convert a container path to a Globus collection path.
 
-    e.g. /mnt/data/Superluminal/session/movies/frame.tif
-      -> /SmartScope/Superluminal/session/movies/frame.tif
+    Args:
+        container_path: Full path inside the container
+        source_base_path: Globus collection prefix (e.g. "/SmartScope")
+        container_root: Container-side prefix to strip (e.g. "/mnt/arctica/Superluminal/SmartScope")
+                        Derived from detector.frames_directory at runtime.
     """
     rel = container_path
-    if rel.startswith(CONTAINER_DATA_ROOT):
-        rel = rel[len(CONTAINER_DATA_ROOT):]
+    if container_root and rel.startswith(container_root):
+        rel = rel[len(container_root):]
     return f"{source_base_path.rstrip('/')}/{rel.lstrip('/')}"
 
 
@@ -148,12 +150,21 @@ class DoppioPreprocessingPipeline(PreprocessingPipeline):
         # Frames directory for this grid (where SerialEM writes .tif/.mrc files)
         self.frames_dir = get_smartscope_frames_dir(self.grid)
 
+        # Container-side roots to strip when building Globus paths.
+        # Frames and data may be mounted differently but map to the same Globus collection.
+        # frames: /mnt/arctica/Superluminal/SmartScope/... -> /SmartScope/...
+        # data:   /mnt/data/...                            -> /SmartScope/...
+        self.container_frames_root = str(self.detector.frames_directory).rstrip('/')
+        self.container_data_root = str(self.grid.directory).rsplit(
+            str(self.grid.session_id.working_directory), 1)[0].rstrip('/')
+
         self._stop = threading.Event()
         self._submitted_groups: Set[str] = set()  # track submitted grouping keys
         self._active_flow_runs: Dict[str, dict] = {}  # flow_run_id -> {batch, group_key}
 
         self.tc = None       # TransferClient (for transfer_only mode)
         self.fc = None       # SpecificFlowClient (for transfer_and_process mode)
+        self.fc_general = None  # FlowsClient (for checking run status)
 
     # ---- Init ----
 
@@ -164,6 +175,19 @@ class DoppioPreprocessingPipeline(PreprocessingPipeline):
         if self.cmd_data.mode == 'transfer_and_process' and self.cmd_data.globus_flow_id:
             try:
                 self.fc = _build_flows_client(self.cmd_data)
+                # Also build a general FlowsClient for checking run status
+                from globus_sdk import FlowsClient
+                tokens = _load_tokens(self.cmd_data.token_file)
+                flows_tokens = tokens.get('flows.globus.org', {})
+                if flows_tokens:
+                    from globus_sdk import NativeAppAuthClient, RefreshTokenAuthorizer
+                    auth_client = NativeAppAuthClient(self.cmd_data.globus_client_id)
+                    authorizer = RefreshTokenAuthorizer(
+                        flows_tokens['refresh_token'], auth_client,
+                        access_token=flows_tokens['access_token'],
+                        expires_at=flows_tokens['expires_at_seconds'],
+                    )
+                    self.fc_general = FlowsClient(authorizer=authorizer)
                 logger.info("Globus Flows client initialized")
             except Exception as e:
                 logger.warning(f"Could not init Flows client: {e}. Falling back to transfer_only.")
@@ -212,17 +236,31 @@ class DoppioPreprocessingPipeline(PreprocessingPipeline):
         self._init_globus_clients()
 
         logger.info(f'Entering main loop. Stop={self._stop.is_set()}, stop_file={self.is_stop_file()}')
+        # DEBUG: single-shot mode — submit one flow and exit
+        DEBUG_SINGLE_SHOT = True
+
         while not self._stop.is_set() and not self.is_stop_file():
             self.list_incomplete_processes()
             logger.debug(f'Incomplete: {len(self.incomplete_processes)} images')
 
-            # Group and submit ready batches
+            # Group and submit ready batches (limit concurrent flow runs)
+            MAX_CONCURRENT_FLOWS = 1
             groups = self._build_groups()
             for group_key, batch in groups.items():
+                if len(self._active_flow_runs) >= MAX_CONCURRENT_FLOWS:
+                    logger.debug(f'Max concurrent flows ({MAX_CONCURRENT_FLOWS}) reached, waiting...')
+                    break
                 if group_key in self._submitted_groups:
                     continue
                 if self._group_is_complete(group_key, batch):
-                    self._submit_group(group_key, batch)
+                    try:
+                        self._submit_group(group_key, batch)
+                        if DEBUG_SINGLE_SHOT:
+                            logger.info('DEBUG: Single-shot mode — submitted one group, exiting loop.')
+                            return
+                    except Exception as e:
+                        logger.error(f'Failed to submit group {group_key}: {e}')
+                        break  # Stop submitting on error, retry next loop
 
             # Check for completed flow runs
             self._check_flow_runs()
@@ -267,7 +305,8 @@ class DoppioPreprocessingPipeline(PreprocessingPipeline):
             # Full container path to the frame file
             container_path = str(self.frames_dir / hm.frames)
 
-            src = _container_to_globus_path(container_path, self.cmd_data.source_base_path)
+            src = _container_to_globus_path(container_path, self.cmd_data.source_base_path,
+                                                self.container_frames_root)
             dst = _globus_dest_path(container_path, self.cmd_data.destination_base_path,
                                     self.project_path, self.grid.grid_id)
             file_pairs.append((src, dst))
@@ -326,14 +365,15 @@ class DoppioPreprocessingPipeline(PreprocessingPipeline):
         dest_base = (f"{self.cmd_data.destination_base_path.rstrip('/')}/"
                      f"{self.project_path.strip('/')}")
 
-        # Write manifest to the grid's data directory (which is on the source collection)
-        manifests_dir = Path(self.grid.directory) / "manifests"
+        # Write manifest to the frames directory (same Globus mount as the frames)
+        manifests_dir = self.frames_dir / "manifests"
         manifests_dir.mkdir(parents=True, exist_ok=True)
         local_path = manifests_dir / f"{batch_id}.json"
         local_path.write_text(json.dumps(manifest, indent=2))
 
         src_manifest = _container_to_globus_path(
-            str(local_path), self.cmd_data.source_base_path
+            str(local_path), self.cmd_data.source_base_path,
+            self.container_frames_root
         )
         dst_manifest = (f"{dest_base}/LivePreprocess/job001/"
                         f"Manifests/{batch_id}.json")
@@ -350,14 +390,34 @@ class DoppioPreprocessingPipeline(PreprocessingPipeline):
                      f'for batch {batch_id}')
 
     def _start_flow_run(self, group_key: str, batch: List, file_pairs: List):
-        """Start a Globus Flow run: transfer -> wait for Doppio -> transfer back."""
-        # We'll get the flow_run_id after starting the run, then send the manifest
-        # Build the project dir path on HPC for the compute function
-        dest_project_dir = (f"{self.cmd_data.destination_base_path.rstrip('/')}/"
-                            f"{self.project_path.strip('/')}")
+        """Start a Globus Flow run: transfer frames+manifest -> compute -> transfer back."""
+        # Globus collection path (for transfers)
+        dest_globus_dir = (f"{self.cmd_data.destination_base_path.rstrip('/')}/"
+                           f"{self.project_path.strip('/')}")
+        # HPC filesystem path (for compute function)
+        fs_root = self.cmd_data.destination_filesystem_root.rstrip('/')
+        dest_fs_dir = f"{fs_root}/{dest_globus_dir.lstrip('/')}"
+
         batch_id = f"{self.grid.grid_id}_{group_key}"
-        manifest_path_on_hpc = (f"{dest_project_dir}/LivePreprocess/job001/"
+        manifest_globus_path = (f"{dest_globus_dir}/LivePreprocess/job001/"
                                 f"Manifests/{batch_id}.json")
+        manifest_path_on_hpc = (f"{dest_fs_dir}/LivePreprocess/job001/"
+                                f"Manifests/{batch_id}.json")
+
+        # Build manifest and write it to the frames directory (same Globus mount)
+        manifest = self._build_manifest(group_key, batch, file_pairs)
+        manifests_dir = self.frames_dir / "manifests"
+        manifests_dir.mkdir(parents=True, exist_ok=True)
+        local_path = manifests_dir / f"{batch_id}.json"
+        local_path.write_text(json.dumps(manifest, indent=2))
+
+        # Add manifest to the same transfer as the frames
+        src_manifest = _container_to_globus_path(
+            str(local_path), self.cmd_data.source_base_path,
+            self.container_frames_root
+        )
+        all_items = [{"source_path": s, "destination_path": d} for s, d in file_pairs]
+        all_items.append({"source_path": src_manifest, "destination_path": manifest_globus_path})
 
         flow_input = {
             "source_collection": self.cmd_data.source_collection_id,
@@ -366,9 +426,9 @@ class DoppioPreprocessingPipeline(PreprocessingPipeline):
             "compute_function_id": self.cmd_data.compute_function_id,
             "compute_kwargs": {
                 "manifest_path": manifest_path_on_hpc,
-                "project_dir": dest_project_dir,
+                "project_dir": dest_fs_dir,
             },
-            "transfer_items": [{"source_path": s, "destination_path": d} for s, d in file_pairs],
+            "transfer_items": all_items,
             "return_transfer_items": [],  # populated after compute completes
             "label": f"SmartScope {self.grid.grid_id} group {group_key}",
         }
@@ -377,11 +437,6 @@ class DoppioPreprocessingPipeline(PreprocessingPipeline):
         run_id = run["run_id"]
         self._active_flow_runs[run_id] = {"batch": batch, "group_key": group_key}
         logger.info(f'Flow run started: {run_id} for group {group_key}')
-
-        # Write and transfer the manifest so Doppio knows about this batch
-        manifest = self._build_manifest(group_key, batch, file_pairs,
-                                         flow_run_id=run_id)
-        self._transfer_manifest(manifest)
 
     def _start_transfer_only(self, group_key: str, batch: List, file_pairs: List):
         """Transfer-only mode: just move files to HPC.
@@ -429,7 +484,7 @@ class DoppioPreprocessingPipeline(PreprocessingPipeline):
             self._submitted_groups.discard(info["group_key"])
 
     def _check_flow(self, run_id: str, info: dict):
-        run = self.fc.get_run(run_id)
+        run = self.fc_general.get_run(run_id)
         status = run["status"]
 
         if status == "SUCCEEDED":

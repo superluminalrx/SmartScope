@@ -19,7 +19,7 @@
     "RunDoppio": {
       "Comment": "Run Doppio Live processing via Globus Compute on HPC",
       "Type": "Action",
-      "ActionUrl": "https://compute.actions.globus.org/v2",
+      "ActionUrl": "https://compute.actions.globus.org",
       "ActionScope": "https://auth.globus.org/scopes/facd7ccc-c5f4-42aa-916b-a0e270e2c2a9/all",
       "Parameters": {
         "endpoint.$": "$.input.compute_endpoint",

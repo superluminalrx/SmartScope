@@ -341,6 +341,7 @@ class DoppioPreprocessingPipeline(PreprocessingPipeline):
             movies.append(rel)
 
         # Build config dict matching doppio-live-worker's PipelineConfig
+        fs_root = self.cmd_data.destination_filesystem_root.rstrip('/')
         dest_globus = (f"{self.cmd_data.destination_base_path.rstrip('/')}/"
                        f"{self.project_path.strip('/')}")
         project_fs = f"{fs_root}/{dest_globus.lstrip('/')}"

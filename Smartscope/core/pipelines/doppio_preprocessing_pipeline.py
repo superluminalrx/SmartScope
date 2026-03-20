@@ -327,34 +327,57 @@ class DoppioPreprocessingPipeline(PreprocessingPipeline):
         """
         batch_id = f"{self.grid.grid_id}_{group_key}"
 
-        # Movie paths relative to the Doppio project root
-        dest_base = (f"{self.cmd_data.destination_base_path.rstrip('/')}/"
-                     f"{self.project_path.strip('/')}")
+        # Movie paths as full HPC filesystem paths
+        fs_root = self.cmd_data.destination_filesystem_root.rstrip('/')
         movies = []
         for _, dst in file_pairs:
-            # dst is absolute on HPC, strip project base to get relative
-            if dst.startswith(dest_base):
-                movies.append(dst[len(dest_base):].lstrip('/'))
-            else:
-                movies.append(dst)
+            # dst is a Globus collection path, prepend filesystem root
+            movies.append(f"{fs_root}/{dst.lstrip('/')}")
 
-        # Metadata overrides from microscope settings
-        metadata = {}
+        # Build config dict matching doppio-live-worker's PipelineConfig
+        dest_globus = (f"{self.cmd_data.destination_base_path.rstrip('/')}/"
+                       f"{self.project_path.strip('/')}")
+        project_fs = f"{fs_root}/{dest_globus.lstrip('/')}"
+        output_dir = f"{project_fs}/LivePreprocess/job001"
+
+        config = {
+            "project_dir": project_fs,
+            "output_dir": output_dir,
+        }
+
+        # Pixel size
         if self.cmd_data.pixel_size_override > 0:
-            metadata["pixel_size"] = self.cmd_data.pixel_size_override
+            config["pixel_size"] = self.cmd_data.pixel_size_override
         elif hasattr(self.detector, 'pixel_size') and self.detector.pixel_size:
-            metadata["pixel_size"] = float(self.detector.pixel_size)
+            config["pixel_size"] = float(self.detector.pixel_size)
+
+        # Microscope settings
         if hasattr(self.microscope, 'voltage') and self.microscope.voltage:
-            metadata["voltage"] = int(self.microscope.voltage)
+            config["voltage"] = int(self.microscope.voltage)
+        if hasattr(self.microscope, 'spherical_abberation') and self.microscope.spherical_abberation:
+            config["cs"] = float(self.microscope.spherical_abberation)
+
+        # Processing parameters from form
         if self.cmd_data.dose_per_frame > 0:
-            metadata["dose_per_frame"] = self.cmd_data.dose_per_frame
+            config["dose_per_frame"] = self.cmd_data.dose_per_frame
+        config["motioncor_binning"] = self.cmd_data.motioncor_binning
+        config["motioncor_patches"] = self.cmd_data.motioncor_patches
+        config["do_motioncor"] = self.cmd_data.do_motioncor
+        config["do_ctf"] = self.cmd_data.do_ctf
+        config["do_miffi"] = self.cmd_data.do_miffi
+        config["do_picking"] = self.cmd_data.do_picking
+        config["do_extraction"] = self.cmd_data.do_extraction
+        config["picking_threshold"] = self.cmd_data.picking_threshold
+        config["picking_model"] = self.cmd_data.picking_model
+        config["extract_box_size"] = self.cmd_data.extract_box_size
+        config["extract_downscale"] = self.cmd_data.extract_downscale
 
         return {
             "batch_id": batch_id,
             "flow_run_id": flow_run_id,
             "movies": movies,
+            "config": config,
             "grid_id": self.grid.grid_id,
-            "metadata": metadata,
         }
 
     def _transfer_manifest(self, manifest: dict):

@@ -135,7 +135,7 @@ class DoppioPipelineForm(forms.Form):
 
     compute_function_id = forms.CharField(
         label='Compute Function ID',
-        initial='62937010-4730-4ecc-8840-e198a91672d9',
+        initial='98ce0589-f233-4bda-842c-c73b109dff77',
         help_text='UUID of the registered Globus Compute function for Doppio processing.',
     )
 

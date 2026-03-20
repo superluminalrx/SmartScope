@@ -265,6 +265,9 @@ class DoppioPreprocessingPipeline(PreprocessingPipeline):
             # Check for completed flow runs
             self._check_flow_runs()
 
+            # Poll for Doppio results (.done.json files on HPC)
+            self._poll_for_results()
+
             # Done?
             self.grid.refresh_from_db()
             if self._is_done():
@@ -527,53 +530,204 @@ class DoppioPreprocessingPipeline(PreprocessingPipeline):
             del self._active_flow_runs[run_id]
             self._submitted_groups.discard(info["group_key"])
 
-    # ---- DB updates ----
+    # ---- Results polling & DB updates ----
 
-    def _update_db(self, batch: List, results: Dict):
-        """Parse Doppio output and update HighMagModel + HoleModel in DB.
+    def _poll_for_results(self):
+        """Check HPC for .done.json files, transfer thumbnails back, update DB."""
+        if not hasattr(self, '_polled_done_files'):
+            self._polled_done_files = set()
 
-        Results come from the Globus Flow completion payload, which contains
-        the .done.json written by Doppio's SmartScope mode. The 'results'
-        field is a list of per-micrograph dicts with CTF, motion, and
-        particle data.
-        """
+        # List the Manifests/ dir on HPC via Globus for .done.json files
+        dest_globus_dir = (f"{self.cmd_data.destination_base_path.rstrip('/')}/"
+                           f"{self.project_path.strip('/')}")
+        manifests_globus = f"{dest_globus_dir}/LivePreprocess/job001/Manifests"
+
+        try:
+            entries = list(self.tc.operation_ls(
+                self.cmd_data.destination_collection_id,
+                path=manifests_globus,
+            ))
+        except Exception as e:
+            logger.debug(f'Could not list Manifests dir: {e}')
+            return
+
+        for entry in entries:
+            name = entry['name']
+            if not name.endswith('.done.json'):
+                continue
+            if name in self._polled_done_files:
+                continue
+
+            self._polled_done_files.add(name)
+            logger.info(f'Found completion marker: {name}')
+
+            # Transfer the .done.json back
+            self._transfer_done_file_and_update(name, manifests_globus, dest_globus_dir)
+
+    def _transfer_done_file_and_update(self, done_filename: str,
+                                        manifests_globus: str, dest_globus_dir: str):
+        """Transfer .done.json + thumbnails from HPC, then update DB."""
+        from globus_sdk import TransferData
+        import time as _time
+
+        # Transfer .done.json to local manifests dir
+        local_manifests = self.frames_dir / "manifests"
+        local_manifests.mkdir(parents=True, exist_ok=True)
+        local_done_path = local_manifests / done_filename
+
+        src_done = f"{manifests_globus}/{done_filename}"
+        dst_done = _container_to_globus_path(
+            str(local_done_path), self.cmd_data.source_base_path,
+            self.container_frames_root
+        )
+
+        td = TransferData(
+            source_endpoint=self.cmd_data.destination_collection_id,
+            destination_endpoint=self.cmd_data.source_collection_id,
+            label=f'Results {done_filename}',
+        )
+        td.add_item(src_done, dst_done)
+
+        # Also transfer thumbnails referenced in the done file
+        # We'll add them after we read the done file — for now just get the done file
+        try:
+            result = self.tc.submit_transfer(td)
+            task_id = result['task_id']
+            logger.info(f'Results transfer submitted: {task_id}')
+
+            # Wait for this small transfer to complete
+            for _ in range(30):
+                task = self.tc.get_task(task_id)
+                if task['status'] == 'SUCCEEDED':
+                    break
+                elif task['status'] in ('FAILED', 'CANCELLED'):
+                    logger.error(f'Results transfer failed: {task_id}')
+                    return
+                _time.sleep(2)
+
+        except Exception as e:
+            logger.error(f'Failed to transfer results: {e}')
+            return
+
+        # Read the .done.json and update DB
+        if not local_done_path.exists():
+            logger.warning(f'Done file not found locally after transfer: {local_done_path}')
+            return
+
+        done_data = json.loads(local_done_path.read_text())
+        if done_data.get('status') != 'completed':
+            logger.warning(f'Batch {done_data.get("batch_id")} failed: {done_data.get("error", "")}')
+            return
+
+        # Now transfer thumbnails back
+        self._transfer_thumbnails(done_data, dest_globus_dir)
+
+        # Update DB with results
+        self._update_db_from_done(done_data)
+
+    def _transfer_thumbnails(self, done_data: dict, dest_globus_dir: str):
+        """Transfer micrograph + CTF thumbnails from HPC back to DTN."""
+        from globus_sdk import TransferData
+        import time as _time
+
+        td = TransferData(
+            source_endpoint=self.cmd_data.destination_collection_id,
+            destination_endpoint=self.cmd_data.source_collection_id,
+            label=f'Thumbnails {done_data.get("batch_id", "")}',
+        )
+
+        results = done_data.get('results', [])
+        item_count = 0
+        for mic in results:
+            # Micrograph thumbnail
+            thumb = mic.get('thumbnail', '')
+            if thumb:
+                src = f"{dest_globus_dir}/{thumb.lstrip('/')}"
+                # Put thumbnail in SmartScope's pngs/ directory
+                movie_stem = Path(mic.get('movie', '')).stem
+                hm_name = self._find_hm_name_for_movie(movie_stem)
+                if hm_name:
+                    dst_local = Path(self.grid.directory) / 'pngs' / f'{hm_name}.png'
+                    dst_local.parent.mkdir(parents=True, exist_ok=True)
+                    dst = _container_to_globus_path(
+                        str(dst_local), self.cmd_data.source_base_path,
+                        str(Path(self.grid.directory).parents[1])
+                    )
+                    td.add_item(src, dst)
+                    item_count += 1
+
+            # CTF thumbnail
+            ctf_thumb = mic.get('ctf_thumbnail', '')
+            if ctf_thumb:
+                src = f"{dest_globus_dir}/{ctf_thumb.lstrip('/')}"
+                if hm_name:
+                    dst_local = Path(self.grid.directory) / hm_name / 'ctf.png'
+                    dst_local.parent.mkdir(parents=True, exist_ok=True)
+                    dst = _container_to_globus_path(
+                        str(dst_local), self.cmd_data.source_base_path,
+                        str(Path(self.grid.directory).parents[1])
+                    )
+                    td.add_item(src, dst)
+                    item_count += 1
+
+        if item_count == 0:
+            logger.debug('No thumbnails to transfer')
+            return
+
+        try:
+            result = self.tc.submit_transfer(td)
+            logger.info(f'Thumbnail transfer submitted: {result["task_id"]} ({item_count} files)')
+        except Exception as e:
+            logger.error(f'Failed to submit thumbnail transfer: {e}')
+
+    def _find_hm_name_for_movie(self, movie_stem: str) -> str:
+        """Find the HighMagModel name that corresponds to a movie filename stem."""
+        for hm in self.incomplete_processes:
+            if hm.frames and Path(hm.frames).stem == movie_stem:
+                return hm.name
+        return ''
+
+    def _update_db_from_done(self, done_data: dict):
+        """Update HighMagModel + HoleModel from a .done.json file."""
         from django.utils import timezone
 
-        # Index results by movie filename for matching to HighMagModels
-        result_list = results.get("results", [])
-        results_by_movie = {}
-        for r in result_list:
-            movie = r.get("movie", "")
-            # Key on filename stem (without extension or path)
-            stem = Path(movie).stem
-            results_by_movie[stem] = r
+        results = done_data.get('results', [])
+        pixel_size = self.cmd_data.pixel_size_override or (
+            float(self.detector.pixel_size) if hasattr(self.detector, 'pixel_size')
+            and self.detector.pixel_size else 1.0
+        )
 
         highmags_to_update = []
         holes_to_update = []
 
-        for hm in batch:
-            # Match by filename stem
-            hm_stem = Path(str(hm.pk)).stem
-            mic_result = results_by_movie.get(hm_stem, {})
-
-            if not mic_result:
-                logger.warning(f"No Doppio result for {hm.pk}")
+        for mic in results:
+            movie_stem = Path(mic.get('movie', '')).stem
+            hm_name = self._find_hm_name_for_movie(movie_stem)
+            if not hm_name:
+                logger.warning(f'No HighMagModel found for movie {movie_stem}')
                 continue
 
-            defocus_u = mic_result.get("defocus_u", 0.0)
-            defocus_v = mic_result.get("defocus_v", 0.0)
-            defocus_avg = (defocus_u + defocus_v) / 2.0
+            try:
+                hm = HighMagModel.objects.get(name=hm_name)
+            except HighMagModel.DoesNotExist:
+                logger.warning(f'HighMagModel {hm_name} not in DB')
+                continue
 
-            hm.defocus = defocus_avg
+            defocus_u = mic.get('defocus_u', 0.0)
+            defocus_v = mic.get('defocus_v', 0.0)
+
+            hm.defocus = (defocus_u + defocus_v) / 2.0
             hm.astig = abs(defocus_u - defocus_v)
-            hm.angast = mic_result.get("defocus_angle", 0.0)
-            hm.ctffit = mic_result.get("ctf_max_resolution", 999.0)
-            hm.ice_thickness = mic_result.get("ice_thickness", 0.0)
+            hm.angast = mic.get('defocus_angle', 0.0)
+            hm.ctffit = mic.get('ctf_max_resolution', 999.0)
+            hm.ice_thickness = int(round(mic.get('ice_thickness', 0.0) / 10))
+            hm.shape_x = mic.get('shape_x', 0)
+            hm.shape_y = mic.get('shape_y', 0)
+            hm.pixel_size = pixel_size
             hm.status = 'completed'
             hm.completion_time = timezone.now()
             highmags_to_update.append(hm)
 
-            # Update parent hole status
             if hm.hole_id:
                 hm.hole_id.status = 'completed'
                 hm.hole_id.completion_time = timezone.now()
@@ -585,7 +739,8 @@ class DoppioPreprocessingPipeline(PreprocessingPipeline):
                     HighMagModel.objects.bulk_update(
                         highmags_to_update,
                         fields=['status', 'defocus', 'astig', 'angast', 'ctffit',
-                                'ice_thickness', 'completion_time']
+                                'ice_thickness', 'shape_x', 'shape_y', 'pixel_size',
+                                'completion_time']
                     )
                 if holes_to_update:
                     HoleModel.objects.bulk_update(
@@ -596,10 +751,10 @@ class DoppioPreprocessingPipeline(PreprocessingPipeline):
             all_updated = highmags_to_update + holes_to_update
             websocket_update(all_updated, self.grid.grid_id)
             logger.info(f"Updated {len(highmags_to_update)} high-mag images, "
-                         f"{len(holes_to_update)} holes")
+                         f"{len(holes_to_update)} holes from Doppio results")
 
     def check_for_update(self, instance):
-        pass  # Handled by _update_db
+        pass  # Handled by _poll_for_results
 
     # ---- Shutdown ----
 

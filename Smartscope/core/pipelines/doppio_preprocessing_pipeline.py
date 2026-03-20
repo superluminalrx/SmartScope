@@ -327,12 +327,18 @@ class DoppioPreprocessingPipeline(PreprocessingPipeline):
         """
         batch_id = f"{self.grid.grid_id}_{group_key}"
 
-        # Movie paths as full HPC filesystem paths
-        fs_root = self.cmd_data.destination_filesystem_root.rstrip('/')
+        # Movie paths relative to Doppio project dir
+        # (SmartScopeMode resolves them to absolute via project_dir)
+        dest_globus_base = (f"{self.cmd_data.destination_base_path.rstrip('/')}/"
+                            f"{self.project_path.strip('/')}")
         movies = []
         for _, dst in file_pairs:
-            # dst is a Globus collection path, prepend filesystem root
-            movies.append(f"{fs_root}/{dst.lstrip('/')}")
+            # dst is a Globus collection path like /CryoEM/Projects/Rori/Movies/grid/frame.tif
+            # Strip the project prefix to get relative path like Movies/grid/frame.tif
+            rel = dst
+            if rel.startswith(dest_globus_base):
+                rel = rel[len(dest_globus_base):].lstrip('/')
+            movies.append(rel)
 
         # Build config dict matching doppio-live-worker's PipelineConfig
         dest_globus = (f"{self.cmd_data.destination_base_path.rstrip('/')}/"

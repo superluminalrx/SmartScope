@@ -102,16 +102,26 @@ def run_doppio_live(manifest_path: str, project_dir: str,
         }
         config_path.write_text(_json.dumps(live_config, indent=2))
 
-        subprocess.Popen(
-            ['bash', '-c',
-             'source /etc/profile && '
-             'export MODULEPATH=$MODULEPATH:/home/group/superluminal/software/modulefiles && '
-             'module load ccp/doppio && '
-             f'doppio-live-orchestrator --config "{config_path}" '
-             f'> "{job_dir}/orchestrator.log" 2>&1 &\n'
-             f'echo $! > "{pid_file}"'],
+        # Write a launcher script so we can get the orchestrator's actual PID
+        launcher = job_dir / 'start_orchestrator.sh'
+        launcher.write_text(
+            '#!/bin/bash\n'
+            'source /etc/profile\n'
+            'export MODULEPATH=$MODULEPATH:/home/group/superluminal/software/modulefiles\n'
+            'module load ccp/doppio\n'
+            f'exec doppio-live-orchestrator --config "{config_path}"\n'
+        )
+        os.chmod(str(launcher), 0o755)
+
+        log_file = open(str(job_dir / 'orchestrator.log'), 'a')
+        proc = subprocess.Popen(
+            [str(launcher)],
+            stdout=log_file,
+            stderr=subprocess.STDOUT,
             start_new_session=True,
         )
+        pid_file.write_text(str(proc.pid))
+        log_file.close()
 
     # --- Wait for .done.json ---
     timeout = 3600  # 1 hour max

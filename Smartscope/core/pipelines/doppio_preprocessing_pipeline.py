@@ -299,7 +299,7 @@ class DoppioPreprocessingPipeline(PreprocessingPipeline):
         logger.info(f'Submitting group {group_key}: {len(batch)} images')
         self._submitted_groups.add(group_key)
 
-        # Build file list from actual frame paths
+        # Build file list from actual frame paths (include .mdoc sidecar files)
         file_pairs = []
         for hm in batch:
             if not hm.frames:
@@ -313,6 +313,14 @@ class DoppioPreprocessingPipeline(PreprocessingPipeline):
             dst = _globus_dest_path(container_path, self.cmd_data.destination_base_path,
                                     self.project_path, self.grid.grid_id)
             file_pairs.append((src, dst))
+
+            # Also transfer the .mdoc sidecar if it exists
+            mdoc_path = container_path + '.mdoc'
+            if Path(mdoc_path).exists():
+                mdoc_src = _container_to_globus_path(mdoc_path, self.cmd_data.source_base_path,
+                                                     self.container_frames_root)
+                mdoc_dst = dst + '.mdoc'
+                file_pairs.append((mdoc_src, mdoc_dst))
 
         if self.cmd_data.mode == 'transfer_and_process' and self.fc:
             self._start_flow_run(group_key, batch, file_pairs)

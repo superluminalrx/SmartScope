@@ -460,10 +460,15 @@ class DoppioPreprocessingPipeline(PreprocessingPipeline):
             "compute_kwargs": {
                 "manifest_path": manifest_path_on_hpc,
                 "project_dir": dest_fs_dir,
+                "source_collection": self.cmd_data.source_collection_id,
+                "destination_collection": self.cmd_data.destination_collection_id,
+                "source_base_path": self.cmd_data.source_base_path,
+                "destination_base_path": self.cmd_data.destination_base_path,
+                "destination_filesystem_root": self.cmd_data.destination_filesystem_root,
             },
             "transfer_items": all_items,
-            "return_transfer_items": [],  # populated after compute completes
             "label": f"SmartScope {self.grid.grid_id} group {group_key}",
+            "results_label": f"Results {self.grid.grid_id} group {group_key}",
         }
 
         run = self.fc.run_flow(body={"input": flow_input})

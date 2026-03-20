@@ -1,5 +1,5 @@
 {
-  "Comment": "SmartScope -> Doppio preprocessing flow. Transfer frames to HPC, run Doppio Live via Globus Compute, transfer results back.",
+  "Comment": "SmartScope -> Doppio preprocessing flow. Transfer frames to HPC, run Doppio Live via Globus Compute.",
   "StartAt": "TransferToHPC",
   "States": {
     "TransferToHPC": {
@@ -27,20 +27,6 @@
         "kwargs.$": "$.input.compute_kwargs"
       },
       "ResultPath": "$.ComputeResult",
-      "Next": "TransferResultsBack"
-    },
-    "TransferResultsBack": {
-      "Comment": "Transfer processed results from HPC back to DTN",
-      "Type": "Action",
-      "ActionUrl": "https://transfer.actions.globus.org/transfer",
-      "ActionScope": "urn:globus:auth:scope:transfer.api.globus.org:all",
-      "Parameters": {
-        "source_endpoint.$": "$.input.destination_collection",
-        "destination_endpoint.$": "$.input.source_collection",
-        "DATA.$": "$.input.return_transfer_items",
-        "label": "Doppio results -> SmartScope"
-      },
-      "ResultPath": "$.TransferBack",
       "End": true
     }
   }

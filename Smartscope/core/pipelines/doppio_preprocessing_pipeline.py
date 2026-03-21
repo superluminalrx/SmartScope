@@ -236,8 +236,7 @@ class DoppioPreprocessingPipeline(PreprocessingPipeline):
         self._init_globus_clients()
 
         logger.info(f'Entering main loop. Stop={self._stop.is_set()}, stop_file={self.is_stop_file()}')
-        # DEBUG: single-shot mode — submit one flow and exit
-        DEBUG_SINGLE_SHOT = True
+        DEBUG_SINGLE_SHOT = False
 
         while not self._stop.is_set() and not self.is_stop_file():
             self.list_incomplete_processes()
@@ -255,9 +254,6 @@ class DoppioPreprocessingPipeline(PreprocessingPipeline):
                 if self._group_is_complete(group_key, batch):
                     try:
                         self._submit_group(group_key, batch)
-                        if DEBUG_SINGLE_SHOT:
-                            logger.info('DEBUG: Single-shot mode — submitted one group, exiting loop.')
-                            return
                     except Exception as e:
                         logger.error(f'Failed to submit group {group_key}: {e}')
                         break  # Stop submitting on error, retry next loop

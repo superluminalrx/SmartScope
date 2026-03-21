@@ -15,214 +15,183 @@ def run_doppio_live(manifest_path: str, project_dir: str,
                     source_collection: str = "", destination_collection: str = "",
                     source_base_path: str = "", destination_base_path: str = "",
                     destination_filesystem_root: str = "") -> dict:
-    """Ensure Doppio Live orchestrator is running, wait for batch results.
+    """Run a Doppio preprocessing job for a batch of movies.
 
-    Called by Globus Compute on the HPC endpoint. Initializes a pipeliner
-    project if needed, starts the live preprocessing job through pipeliner,
-    then polls for the .done.json for this batch. Returns a dict with
-    results metadata and transfer_items for the return transfer.
+    Called by Globus Compute on the HPC endpoint. Each BIS group gets its
+    own pipeliner job. Initializes the pipeliner project if needed, writes
+    a movies file, creates and runs a live.preprocessing job in SmartScope
+    mode (no orchestrator), and returns results + transfer items.
     """
     import json as _json
     import os
-    import time
+    import subprocess
+    import textwrap
     from pathlib import Path as _Path
 
     manifest = _json.loads(_Path(manifest_path).read_text())
     batch_id = manifest.get('batch_id', 'unknown')
     config = manifest.get('config', {})
 
-    # --- Find the live job directory (highest job number) ---
-    def find_job_dir():
-        live_dir = _Path(project_dir) / 'LivePreprocess'
-        if not live_dir.exists():
-            return live_dir / 'job001'
-        jobs = sorted(live_dir.glob('job*'))
-        return jobs[-1] if jobs else live_dir / 'job001'
+    # Filter to only movie files (not .mdoc etc)
+    movies = [m for m in manifest.get('movies', [])
+              if m.lower().endswith(('.tif', '.tiff', '.mrc', '.eer'))]
 
-    # --- Start orchestrator via pipeliner if not running ---
-    job_dir = find_job_dir()
-    pid_file = job_dir / 'orchestrator.pid'
-    orchestrator_running = False
-    if pid_file.exists():
-        try:
-            pid = int(pid_file.read_text().strip())
-            os.kill(pid, 0)
-            orchestrator_running = True
-        except (ProcessLookupError, ValueError):
-            pid_file.unlink(missing_ok=True)
+    if not movies:
+        return {'status': 'completed', 'batch_id': batch_id,
+                'results': [], 'transfer_items': []}
 
-    if not orchestrator_running:
-        import subprocess
-        import textwrap
+    # Write movies file to project dir
+    movies_file = _Path(project_dir) / f'.smartscope_movies_{batch_id}.txt'
+    movies_file.write_text('\n'.join(movies) + '\n')
 
-        # Write a Python script that runs inside the Doppio environment
-        # to initialize the pipeliner project and launch the job.
-        # We can't import pipeliner directly because Globus Compute's
-        # Python environment doesn't have it installed.
-        launcher_script = _Path(project_dir) / '.smartscope_launch_live.py'
-        launcher_script.write_text(textwrap.dedent(f'''\
-            import json, os, sys, shutil
-            from pathlib import Path
-            os.chdir({project_dir!r})
+    # Write launcher script that runs inside Doppio environment
+    launcher_script = _Path(project_dir) / f'.smartscope_launch_{batch_id}.py'
+    launcher_script.write_text(textwrap.dedent(f'''\
+        import json, os
+        from pathlib import Path
+        os.chdir({project_dir!r})
 
-            from pipeliner.project_graph import ProjectGraph, new_job_of_type
-            from pipeliner.job_manager import run_job
+        from pipeliner.project_graph import ProjectGraph, new_job_of_type
+        from pipeliner.job_manager import run_job
 
-            config = json.loads({_json.dumps(config)!r})
+        config = json.loads({_json.dumps(config)!r})
 
-            # SmartScope's transfer step creates LivePreprocess/job001/Manifests
-            # before pipeliner runs. Move Manifests to a temp location so
-            # pipeliner can create the job directory fresh. Movies are
-            # transferred to project-level Movies/ and stay there (manifest
-            # paths are relative to project_dir).
-            stashed_manifests = Path(".stashed_manifests")
-            old_manifests = Path("LivePreprocess/job001/Manifests")
-            if old_manifests.exists():
-                if stashed_manifests.exists():
-                    # Move contents into existing stash
-                    for f in old_manifests.iterdir():
-                        f.rename(stashed_manifests / f.name)
-                else:
-                    old_manifests.rename(stashed_manifests)
-            stashed_manifests.mkdir(exist_ok=True)
-
-            # Remove the pre-existing LivePreprocess dir so pipeliner
-            # can create it fresh with correct ownership
-            lp = Path("LivePreprocess")
-            if lp.exists():
-                shutil.rmtree(str(lp), ignore_errors=True)
-
-            pipeline_star = Path("default_pipeline.star")
-            create_new = not pipeline_star.exists()
-            pipeline = ProjectGraph(
-                name="default",
-                pipeline_dir=".",
-                read_only=False,
-                create_new=create_new,
-            )
-
-            job = new_job_of_type("live.preprocessing")
-
-            # Enable SmartScope mode
-            if "smartscope_mode" in job.joboptions:
-                job.joboptions["smartscope_mode"].value = True
-
-            # Set job options from manifest config
-            direct_keys = [
-                "movie_pattern", "num_workers", "batch_size",
-                "worker_partition", "worker_account", "worker_time_limit",
-                "worker_mem", "pixel_size", "voltage", "cs",
-                "amplitude_contrast", "dose_per_frame", "gain_reference",
-                "motioncor_module", "motioncor_patches", "motioncor_binning",
-                "ctf_module", "ctf_box_size", "defocus_min", "defocus_max",
-                "picking_module", "picking_model", "picking_threshold",
-                "box_size", "extract_box_size", "extract_downscale",
-                "thumbnail_size",
-            ]
-            for key in direct_keys:
-                if key in job.joboptions and key in config:
-                    job.joboptions[key].value = config[key]
-
-            if "do_picking" in job.joboptions and "do_picking" in config:
-                job.joboptions["do_picking"].value = config["do_picking"]
-            if "do_extract" in job.joboptions and "do_extraction" in config:
-                job.joboptions["do_extract"].value = config["do_extraction"]
-
-            run_job(pipeline, job, ignore_invalid_joboptions=True)
-            pipeline.close()
-
-            # Move stashed manifests into the pipeliner-created job directory.
-            job_dirs = sorted(Path("LivePreprocess").glob("job*"))
-            if job_dirs:
-                job_dir = job_dirs[-1]
-                dst = job_dir / "Manifests"
-                dst.mkdir(exist_ok=True)
-                for f in stashed_manifests.iterdir():
-                    target = dst / f.name
-                    if not target.exists():
-                        f.rename(target)
-                try:
-                    stashed_manifests.rmdir()
-                except OSError:
-                    pass
-
-            print("PIPELINER_OK")
-        '''))
-
-        # Run via a shell script that loads the Doppio module first
-        shell_script = _Path(project_dir) / '.smartscope_launch_live.sh'
-        shell_script.write_text(
-            '#!/bin/bash\n'
-            'source /etc/profile\n'
-            'export MODULEPATH=$MODULEPATH:/home/group/superluminal/software/modulefiles\n'
-            'module load ccp/doppio\n'
-            f'exec python3 "{launcher_script}"\n'
+        pipeline_star = Path("default_pipeline.star")
+        create_new = not pipeline_star.exists()
+        pipeline = ProjectGraph(
+            name="default",
+            pipeline_dir=".",
+            read_only=False,
+            create_new=create_new,
         )
-        os.chmod(str(shell_script), 0o755)
 
-        result = subprocess.run(
-            [str(shell_script)],
-            capture_output=True, text=True, timeout=120,
-        )
-        if 'PIPELINER_OK' not in result.stdout:
-            raise RuntimeError(
-                f'Failed to launch pipeliner job:\n'
-                f'stdout: {result.stdout}\nstderr: {result.stderr}'
-            )
+        job = new_job_of_type("live.preprocessing")
 
-        # Clean up temp scripts
-        launcher_script.unlink(missing_ok=True)
-        shell_script.unlink(missing_ok=True)
+        # SmartScope mode: process movies file directly, no orchestrator
+        if "smartscope_mode" in job.joboptions:
+            job.joboptions["smartscope_mode"].value = True
+        if "movies_file" in job.joboptions:
+            job.joboptions["movies_file"].value = {str(movies_file)!r}
 
-        # Update job_dir since pipeliner created a new one
-        job_dir = find_job_dir()
+        # Set job options from manifest config
+        direct_keys = [
+            "pixel_size", "voltage", "cs", "amplitude_contrast",
+            "dose_per_frame", "gain_reference",
+            "motioncor_patches", "motioncor_binning",
+            "ctf_box_size", "defocus_min", "defocus_max",
+            "picking_model", "picking_threshold", "box_size",
+            "extract_box_size", "extract_downscale", "thumbnail_size",
+        ]
+        for key in direct_keys:
+            if key in job.joboptions and key in config:
+                job.joboptions[key].value = config[key]
 
-    # --- Wait for .done.json ---
-    done_file = job_dir / 'Manifests' / f'{batch_id}.done.json'
+        if "do_picking" in job.joboptions and "do_picking" in config:
+            job.joboptions["do_picking"].value = config["do_picking"]
+        if "do_extract" in job.joboptions and "do_extraction" in config:
+            job.joboptions["do_extract"].value = config["do_extraction"]
 
-    timeout = 3600  # 1 hour max
-    poll_interval = 5
-    elapsed = 0
-    while elapsed < timeout:
-        if done_file.exists():
+        # Run to completion (foreground)
+        run_job(pipeline, job, ignore_invalid_joboptions=True,
+                run_in_foreground=True)
+        pipeline.close()
+
+        # Find the job directory that was created
+        job_dirs = sorted(Path("LivePreprocess").glob("job*"))
+        print("JOB_DIR=" + str(job_dirs[-1]) if job_dirs else "JOB_DIR=NONE")
+    '''))
+
+    shell_script = _Path(project_dir) / f'.smartscope_launch_{batch_id}.sh'
+    shell_script.write_text(
+        '#!/bin/bash\n'
+        'source /etc/profile\n'
+        'export MODULEPATH=$MODULEPATH:/home/group/superluminal/software/modulefiles\n'
+        'module load ccp/doppio\n'
+        f'exec python3 "{launcher_script}"\n'
+    )
+    os.chmod(str(shell_script), 0o755)
+
+    result = subprocess.run(
+        [str(shell_script)],
+        capture_output=True, text=True, timeout=3600,
+    )
+
+    # Clean up temp scripts
+    launcher_script.unlink(missing_ok=True)
+    shell_script.unlink(missing_ok=True)
+    movies_file.unlink(missing_ok=True)
+
+    # Parse job directory from output
+    job_dir = None
+    for line in result.stdout.splitlines():
+        if line.startswith('JOB_DIR='):
+            job_dir = _Path(project_dir) / line.split('=', 1)[1]
             break
-        time.sleep(poll_interval)
-        elapsed += poll_interval
 
-    if not done_file.exists():
-        raise TimeoutError(f'Timed out waiting for {done_file} after {timeout}s')
+    if result.returncode != 0 or job_dir is None or str(job_dir) == 'NONE':
+        raise RuntimeError(
+            f'Pipeliner job failed:\nstdout: {result.stdout}\nstderr: {result.stderr}')
 
-    # --- Read results and build return transfer items ---
-    done_data = _json.loads(done_file.read_text())
+    # --- Read results from STAR file and build transfer items ---
+    # The worker writes results to micrographs_ctf.star. Build a
+    # results dict compatible with SmartScope's _update_db_from_done.
+    results = []
+    thumbnails_dir = job_dir / 'Thumbnails'
+    ctf_thumbnails_dir = job_dir / 'CtfThumbnails'
 
-    # Build Globus path from filesystem path
+    try:
+        import gemmi
+        star_path = job_dir / 'micrographs_ctf.star'
+        if star_path.exists():
+            doc = gemmi.cif.read(str(star_path))
+            block = doc.find_block('micrographs')
+            if block:
+                tags = block.find([
+                    '_rlnMicrographMovieName', '_rlnMicrographName',
+                    '_rlnDefocusU', '_rlnDefocusV', '_rlnDefocusAngle',
+                    '_rlnCtfMaxResolution', '_rlnCtfFigureOfMerit',
+                    '_rlnAccumMotionTotal', '_rlnCtfIceThickness',
+                ])
+                for row in tags:
+                    mic_stem = _Path(row[1]).stem
+                    thumb = thumbnails_dir / f'{mic_stem}.png'
+                    ctf_thumb = ctf_thumbnails_dir / f'{mic_stem}_Ctf.png'
+                    results.append({
+                        'movie': row[0],
+                        'micrograph': row[1],
+                        'defocus_u': float(row[2]) if row[2] != '.' else 0.0,
+                        'defocus_v': float(row[3]) if row[3] != '.' else 0.0,
+                        'defocus_angle': float(row[4]) if row[4] != '.' else 0.0,
+                        'ctf_max_resolution': float(row[5]) if row[5] != '.' else 999.0,
+                        'ctf_fom': float(row[6]) if row[6] != '.' else 0.0,
+                        'total_motion': float(row[7]) if row[7] != '.' else 0.0,
+                        'ice_thickness': float(row[8]) if row[8] != '.' else 0.0,
+                        'thumbnail': str(thumb.relative_to(_Path(project_dir)))
+                                     if thumb.exists() else '',
+                        'ctf_thumbnail': str(ctf_thumb.relative_to(_Path(project_dir)))
+                                         if ctf_thumb.exists() else '',
+                    })
+    except Exception:
+        pass  # gemmi not available in Globus Compute env — results will be empty
+
+    # Build Globus transfer items
     fs_root = destination_filesystem_root.rstrip('/')
-    hpc_globus_base = project_dir.replace(fs_root, '').strip('/')
-    hpc_globus_base = f'/{hpc_globus_base}'
+    hpc_globus_base = '/' + project_dir.replace(fs_root, '').strip('/')
 
     transfer_items = []
-
-    # Transfer the .done.json itself
-    done_rel = str(done_file).replace(project_dir, '').strip('/')
-    transfer_items.append({
-        'source_path': f'{hpc_globus_base}/{done_rel}',
-        'destination_path': f'{source_base_path}/{done_rel}',
-    })
-
-    # Transfer thumbnails
-    for mic in done_data.get('results', []):
+    for mic in results:
         for key in ('thumbnail', 'ctf_thumbnail'):
-            thumb = mic.get(key, '')
-            if thumb:
+            path = mic.get(key, '')
+            if path:
                 transfer_items.append({
-                    'source_path': f'{hpc_globus_base}/{thumb.lstrip("/")}',
-                    'destination_path': f'{source_base_path}/{thumb.lstrip("/")}',
+                    'source_path': f'{hpc_globus_base}/{path}',
+                    'destination_path': f'{source_base_path}/{path}',
                 })
 
     return {
-        'status': done_data.get('status', 'unknown'),
+        'status': 'completed',
         'batch_id': batch_id,
-        'results': done_data.get('results', []),
+        'results': results,
         'transfer_items': transfer_items,
     }
 

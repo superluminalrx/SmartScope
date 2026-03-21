@@ -17,11 +17,11 @@ def run_doppio_live(manifest_path: str, project_dir: str,
                     destination_filesystem_root: str = "") -> dict:
     """Ensure Doppio Live orchestrator is running, wait for batch results.
 
-    Called by Globus Compute on the HPC endpoint. Starts the orchestrator
-    if not running, then polls for the .done.json for this batch. Returns
-    a dict with results metadata and transfer_items for the return transfer.
+    Called by Globus Compute on the HPC endpoint. Initializes a pipeliner
+    project if needed, starts the live preprocessing job through pipeliner,
+    then polls for the .done.json for this batch. Returns a dict with
+    results metadata and transfer_items for the return transfer.
     """
-    import subprocess
     import json as _json
     import os
     import time
@@ -31,12 +31,17 @@ def run_doppio_live(manifest_path: str, project_dir: str,
     batch_id = manifest.get('batch_id', 'unknown')
     config = manifest.get('config', {})
 
-    job_dir = _Path(project_dir) / 'LivePreprocess' / 'job001'
-    config_path = job_dir / 'live_config.json'
-    pid_file = job_dir / 'orchestrator.pid'
-    done_file = job_dir / 'Manifests' / f'{batch_id}.done.json'
+    # --- Find the live job directory (highest job number) ---
+    def find_job_dir():
+        live_dir = _Path(project_dir) / 'LivePreprocess'
+        if not live_dir.exists():
+            return live_dir / 'job001'
+        jobs = sorted(live_dir.glob('job*'))
+        return jobs[-1] if jobs else live_dir / 'job001'
 
-    # --- Start orchestrator if not running ---
+    # --- Start orchestrator via pipeliner if not running ---
+    job_dir = find_job_dir()
+    pid_file = job_dir / 'orchestrator.pid'
     orchestrator_running = False
     if pid_file.exists():
         try:
@@ -47,83 +52,62 @@ def run_doppio_live(manifest_path: str, project_dir: str,
             pid_file.unlink(missing_ok=True)
 
     if not orchestrator_running:
-        # Create job directory structure
-        for subdir in ['MotionCorr/Micrographs', 'CtfFind/Micrographs',
-                       'MiFFI', 'AutoPick/Micrographs', 'Thumbnails',
-                       'CtfThumbnails', 'work_queue', 'workers', 'Manifests',
-                       'Extract/Particles']:
-            (job_dir / subdir).mkdir(parents=True, exist_ok=True)
+        # Change to project directory (pipeliner expects this as cwd)
+        os.chdir(project_dir)
 
-        # Build orchestrator config
-        # In SmartScope mode, don't set watch_directories — movies come
-        # from manifests only. The file watcher would race against the
-        # manifest scanner and process movies before the manifest is read.
-        live_config = {
-            'output_dir': str(job_dir),
-            'project_dir': project_dir,
-            'watch_directories': [],
-            'scan_subdirs': False,
-            'movie_pattern': '*.tif',
-            'smartscope_mode': True,
-            'num_workers': config.get('num_workers', 2),
-            'batch_size': config.get('batch_size', 10),
-            'gpus_per_worker': config.get('gpus_per_worker', 1),
-            'worker_partition': config.get('worker_partition', 'gpupriority'),
-            'worker_account': config.get('worker_account', 'priority-superluminal'),
-            'worker_time_limit': config.get('worker_time_limit', '24:00:00'),
-            'worker_mem': config.get('worker_mem', '32G'),
-            'pixel_size': config.get('pixel_size', 1.0),
-            'voltage': config.get('voltage', 300),
-            'cs': config.get('cs', 2.7),
-            'amplitude_contrast': config.get('amplitude_contrast', 0.07),
-            'dose_per_frame': config.get('dose_per_frame', 1.0),
-            'gain_reference': config.get('gain_reference', ''),
-            'gain_rotation': config.get('gain_rotation', 0),
-            'gain_flip': config.get('gain_flip', 0),
-            'motioncor_backend': config.get('motioncor_backend', 'motioncor3'),
-            'motioncor_module': config.get('motioncor_module', 'motioncor3/1.2.4'),
-            'motioncor_patches': config.get('motioncor_patches', 5),
-            'motioncor_binning': config.get('motioncor_binning', 1.0),
-            'ctf_backend': config.get('ctf_backend', 'ctffind5'),
-            'ctf_module': config.get('ctf_module', 'ctffind/5.0.2'),
-            'ctf_box_size': config.get('ctf_box_size', 512),
-            'defocus_min': config.get('defocus_min', 5000.0),
-            'defocus_max': config.get('defocus_max', 50000.0),
-            'do_picking': config.get('do_picking', True),
-            'picking_backend': config.get('picking_backend', 'cryolo'),
-            'picking_module': config.get('picking_module', 'cryolo/stable'),
-            'picking_model': config.get('picking_model', ''),
-            'picking_threshold': config.get('picking_threshold', 0.3),
-            'box_size': config.get('box_size', 200),
-            'do_extract': config.get('do_extract', False),
-            'extract_box_size': config.get('extract_box_size', 256),
-            'extract_downscale': config.get('extract_downscale', 1),
-            'thumbnail_size': config.get('thumbnail_size', 512),
-        }
-        config_path.write_text(_json.dumps(live_config, indent=2))
+        from pipeliner.project_graph import ProjectGraph, new_job_of_type
+        from pipeliner.job_manager import run_job as pipeliner_run_job
 
-        # Write a launcher script so we can get the orchestrator's actual PID
-        launcher = job_dir / 'start_orchestrator.sh'
-        launcher.write_text(
-            '#!/bin/bash\n'
-            'source /etc/profile\n'
-            'export MODULEPATH=$MODULEPATH:/home/group/superluminal/software/modulefiles\n'
-            'module load ccp/doppio\n'
-            f'exec doppio-live-orchestrator --config "{config_path}"\n'
+        # Initialize or load the pipeliner project
+        pipeline_star = _Path(project_dir) / 'default_pipeline.star'
+        create_new = not pipeline_star.exists()
+        pipeline = ProjectGraph(
+            name='default',
+            pipeline_dir=project_dir,
+            read_only=False,
+            create_new=create_new,
         )
-        os.chmod(str(launcher), 0o755)
 
-        log_file = open(str(job_dir / 'orchestrator.log'), 'a')
-        proc = subprocess.Popen(
-            [str(launcher)],
-            stdout=log_file,
-            stderr=subprocess.STDOUT,
-            start_new_session=True,
-        )
-        pid_file.write_text(str(proc.pid))
-        log_file.close()
+        # Create the live preprocessing job and set options from manifest
+        job = new_job_of_type('live.preprocessing')
+
+        # Enable SmartScope mode
+        if 'smartscope_mode' in job.joboptions:
+            job.joboptions['smartscope_mode'].value = True
+
+        # Map manifest config keys to job option keys
+        # Keys match where job option name == config key
+        direct_keys = [
+            'movie_pattern', 'num_workers', 'batch_size',
+            'worker_partition', 'worker_account', 'worker_time_limit',
+            'worker_mem', 'pixel_size', 'voltage', 'cs',
+            'amplitude_contrast', 'dose_per_frame', 'gain_reference',
+            'motioncor_module', 'motioncor_patches', 'motioncor_binning',
+            'ctf_module', 'ctf_box_size', 'defocus_min', 'defocus_max',
+            'picking_module', 'picking_model', 'picking_threshold',
+            'box_size', 'extract_box_size', 'extract_downscale',
+            'thumbnail_size',
+        ]
+        for key in direct_keys:
+            if key in job.joboptions and key in config:
+                job.joboptions[key].value = config[key]
+
+        # Keys that need name mapping
+        if 'do_picking' in job.joboptions and 'do_picking' in config:
+            job.joboptions['do_picking'].value = config['do_picking']
+        if 'do_extract' in job.joboptions and 'do_extraction' in config:
+            job.joboptions['do_extract'].value = config['do_extraction']
+
+        # Run the job through pipeliner (launches orchestrator in background)
+        pipeliner_run_job(pipeline, job, ignore_invalid_joboptions=True)
+        pipeline.close()
+
+        # Update job_dir since pipeliner may have created a new one
+        job_dir = find_job_dir()
 
     # --- Wait for .done.json ---
+    done_file = job_dir / 'Manifests' / f'{batch_id}.done.json'
+
     timeout = 3600  # 1 hour max
     poll_interval = 5
     elapsed = 0
@@ -139,10 +123,7 @@ def run_doppio_live(manifest_path: str, project_dir: str,
     # --- Read results and build return transfer items ---
     done_data = _json.loads(done_file.read_text())
 
-    # Build list of files to transfer back (HPC → DTN)
-    # Paths are relative to project_dir in the done_data
-    # project_dir on the filesystem (e.g. /mnt/blackmore/ext-superluminal/CryoEM/Projects/Foo)
-    # minus the filesystem root (e.g. /mnt/blackmore/ext-superluminal/) gives the Globus path
+    # Build Globus path from filesystem path
     fs_root = destination_filesystem_root.rstrip('/')
     hpc_globus_base = project_dir.replace(fs_root, '').strip('/')
     hpc_globus_base = f'/{hpc_globus_base}'

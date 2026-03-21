@@ -243,7 +243,7 @@ class DoppioPreprocessingPipeline(PreprocessingPipeline):
             logger.debug(f'Incomplete: {len(self.incomplete_processes)} images')
 
             # Group and submit ready batches (limit concurrent flow runs)
-            MAX_CONCURRENT_FLOWS = 1
+            MAX_CONCURRENT_FLOWS = self.cmd_data.max_concurrent_flows
             groups = self._build_groups()
             for group_key, batch in groups.items():
                 if len(self._active_flow_runs) >= MAX_CONCURRENT_FLOWS:

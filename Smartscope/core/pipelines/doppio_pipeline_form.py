@@ -125,6 +125,14 @@ class DoppioPipelineForm(forms.Form):
         help_text='How to batch images into Globus Flow runs.',
     )
 
+    max_concurrent_flows = forms.IntegerField(
+        label='Max concurrent flows',
+        initial=1,
+        min_value=1,
+        max_value=20,
+        help_text='Maximum number of Globus Flow runs to have active simultaneously.',
+    )
+
     # ===== Globus — these become dropdowns populated from the API =====
 
     globus_compute_endpoint_id = forms.CharField(

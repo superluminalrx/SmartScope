@@ -47,6 +47,9 @@ class DoppioCmdKwargs(BaseModel):
     slot_11: str = ""
     slot_12: str = ""
 
+    # ===== Concurrency =====
+    max_concurrent_flows: int = 1
+
     # ===== Pipeline stages (checkboxes) =====
     do_motioncor: bool = True
     do_ctf: bool = True

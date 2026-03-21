@@ -141,10 +141,11 @@ def run_doppio_live(manifest_path: str, project_dir: str,
 
     # Build list of files to transfer back (HPC → DTN)
     # Paths are relative to project_dir in the done_data
+    # project_dir on the filesystem (e.g. /mnt/blackmore/ext-superluminal/CryoEM/Projects/Foo)
+    # minus the filesystem root (e.g. /mnt/blackmore/ext-superluminal/) gives the Globus path
     fs_root = destination_filesystem_root.rstrip('/')
-    dest_base = destination_base_path.rstrip('/')
-    project_rel = project_dir.replace(fs_root, '').strip('/')
-    hpc_globus_base = f'{dest_base}/{project_rel}'.rstrip('/')
+    hpc_globus_base = project_dir.replace(fs_root, '').strip('/')
+    hpc_globus_base = f'/{hpc_globus_base}'
 
     transfer_items = []
 

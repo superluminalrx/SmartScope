@@ -531,7 +531,14 @@ class DoppioPreprocessingPipeline(PreprocessingPipeline):
 
         if status == "SUCCEEDED":
             logger.info(f'Flow run {run_id} completed for group {info["group_key"]}')
-            self._update_db(info["batch"], run.get("details", {}))
+            # Extract done_data from flow results
+            details = run.get("details", {})
+            results_list = details.get("results", [])
+            if results_list:
+                done_data = results_list[0].get("output", {})
+                self._update_db_from_done(done_data)
+                self._transfer_thumbnails(done_data,
+                    f"{self.cmd_data.destination_base_path.rstrip('/')}/{self.project_path.strip('/')}")
             del self._active_flow_runs[run_id]
 
         elif status in ("FAILED", "CANCELLED"):

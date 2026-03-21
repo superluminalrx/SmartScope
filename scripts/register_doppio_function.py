@@ -90,6 +90,10 @@ def run_doppio_live(manifest_path: str, project_dir: str,
         if "do_extract" in job.joboptions and "do_extraction" in config:
             job.joboptions["do_extract"].value = config["do_extraction"]
 
+        # Enable queue submission (needs GPU node)
+        if "do_queue" in job.joboptions:
+            job.joboptions["do_queue"].value = "Yes"
+
         # Schedule the job (creates job dir + config) but don't run yet
         process = schedule_job(pipeline, job, ignore_invalid_joboptions=True)
 

@@ -71,15 +71,20 @@ def run_doppio_live(manifest_path: str, project_dir: str,
             config = json.loads({_json.dumps(config)!r})
 
             # SmartScope's transfer step creates LivePreprocess/job001/Manifests
-            # and Movies/ before pipeliner runs. Move them to project-level
-            # dirs so pipeliner can create the job directory fresh, then
-            # symlink them back in afterward.
-            for dirname in ("Manifests", "Movies"):
-                project_level = Path(dirname)
-                old_in_job = Path("LivePreprocess/job001/" + dirname)
-                if old_in_job.exists() and not project_level.exists():
-                    old_in_job.rename(project_level)
-                project_level.mkdir(exist_ok=True)
+            # before pipeliner runs. Move Manifests to a temp location so
+            # pipeliner can create the job directory fresh. Movies are
+            # transferred to project-level Movies/ and stay there (manifest
+            # paths are relative to project_dir).
+            stashed_manifests = Path(".stashed_manifests")
+            old_manifests = Path("LivePreprocess/job001/Manifests")
+            if old_manifests.exists():
+                if stashed_manifests.exists():
+                    # Move contents into existing stash
+                    for f in old_manifests.iterdir():
+                        f.rename(stashed_manifests / f.name)
+                else:
+                    old_manifests.rename(stashed_manifests)
+            stashed_manifests.mkdir(exist_ok=True)
 
             # Remove the pre-existing job dir if empty
             for d in (Path("LivePreprocess/job001"), Path("LivePreprocess")):
@@ -128,26 +133,20 @@ def run_doppio_live(manifest_path: str, project_dir: str,
             run_job(pipeline, job, ignore_invalid_joboptions=True)
             pipeline.close()
 
-            # Move stashed files into the pipeliner-created job directory.
-            # Can't use symlinks — GridFTP won't follow them.
+            # Move stashed manifests into the pipeliner-created job directory.
             job_dirs = sorted(Path("LivePreprocess").glob("job*"))
             if job_dirs:
                 job_dir = job_dirs[-1]
-                for dirname in ("Manifests", "Movies"):
-                    src = Path(dirname)
-                    dst = job_dir / dirname
-                    if src.exists():
-                        # Move contents into pipeliner's dir (which may already exist)
-                        dst.mkdir(exist_ok=True)
-                        for f in src.iterdir():
-                            target = dst / f.name
-                            if not target.exists():
-                                f.rename(target)
-                        # Remove the now-empty project-level dir
-                        try:
-                            src.rmdir()
-                        except OSError:
-                            pass
+                dst = job_dir / "Manifests"
+                dst.mkdir(exist_ok=True)
+                for f in stashed_manifests.iterdir():
+                    target = dst / f.name
+                    if not target.exists():
+                        f.rename(target)
+                try:
+                    stashed_manifests.rmdir()
+                except OSError:
+                    pass
 
             print("PIPELINER_OK")
         '''))

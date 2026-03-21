@@ -293,9 +293,28 @@ class DoppioPreprocessingPipeline(PreprocessingPipeline):
 
     # ---- Submission ----
 
+    def _flow_label(self, group_key: str, batch: List) -> str:
+        """Build a descriptive label: Session_Grid_Square_BISGroup."""
+        session = self.grid.session_id.session_id
+        grid = self.grid.grid_id
+        # Get square number from first item's hole
+        square = ''
+        if batch:
+            hole = getattr(batch[0], 'hole_id', None)
+            if hole:
+                sq = getattr(hole, 'square_id', None)
+                if sq:
+                    square = str(sq.number)
+        parts = [session, grid]
+        if square:
+            parts.append(f'sq{square}')
+        parts.append(group_key)
+        return '_'.join(parts)
+
     def _submit_group(self, group_key: str, batch: List):
         """Submit a group of images as a Globus Flow run (or transfer-only)."""
-        logger.info(f'Submitting group {group_key}: {len(batch)} images')
+        label = self._flow_label(group_key, batch)
+        logger.info(f'Submitting {label}: {len(batch)} images')
         self._submitted_groups.add(group_key)
 
         # Build file list from actual frame paths (include .mdoc sidecar files)
@@ -322,9 +341,9 @@ class DoppioPreprocessingPipeline(PreprocessingPipeline):
                 file_pairs.append((mdoc_src, mdoc_dst))
 
         if self.cmd_data.mode == 'transfer_and_process' and self.fc:
-            self._start_flow_run(group_key, batch, file_pairs)
+            self._start_flow_run(group_key, batch, file_pairs, label)
         else:
-            self._start_transfer_only(group_key, batch, file_pairs)
+            self._start_transfer_only(group_key, batch, file_pairs, label)
 
     def _build_manifest(self, group_key: str, batch: List, file_pairs: List,
                          flow_run_id: str = "") -> dict:
@@ -429,7 +448,7 @@ class DoppioPreprocessingPipeline(PreprocessingPipeline):
         logger.info(f'Manifest transfer submitted: {result["task_id"]} '
                      f'for batch {batch_id}')
 
-    def _start_flow_run(self, group_key: str, batch: List, file_pairs: List):
+    def _start_flow_run(self, group_key: str, batch: List, file_pairs: List, label: str = ""):
         """Start a Globus Flow run: transfer frames+manifest -> compute -> transfer back."""
         # Globus collection path (for transfers)
         dest_globus_dir = (f"{self.cmd_data.destination_base_path.rstrip('/')}/"
@@ -474,16 +493,16 @@ class DoppioPreprocessingPipeline(PreprocessingPipeline):
                 "destination_filesystem_root": self.cmd_data.destination_filesystem_root,
             },
             "transfer_items": all_items,
-            "label": f"SmartScope {self.grid.grid_id} group {group_key}",
-            "results_label": f"Results {self.grid.grid_id} group {group_key}",
+            "label": label,
+            "results_label": f"Results {label}",
         }
 
         run = self.fc.run_flow(body={"input": flow_input})
         run_id = run["run_id"]
         self._active_flow_runs[run_id] = {"batch": batch, "group_key": group_key}
-        logger.info(f'Flow run started: {run_id} for group {group_key}')
+        logger.info(f'Flow run started: {run_id} for {label}')
 
-    def _start_transfer_only(self, group_key: str, batch: List, file_pairs: List):
+    def _start_transfer_only(self, group_key: str, batch: List, file_pairs: List, label: str = ""):
         """Transfer-only mode: just move files to HPC.
 
         Also writes a manifest so Doppio can pick them up later
@@ -494,7 +513,7 @@ class DoppioPreprocessingPipeline(PreprocessingPipeline):
         td = TransferData(
             source_endpoint=self.cmd_data.source_collection_id,
             destination_endpoint=self.cmd_data.destination_collection_id,
-            label=f'SmartScope->HPC {self.grid.grid_id} group {group_key}',
+            label=label,
         )
         for src, dst in file_pairs:
             td.add_item(src, dst)
@@ -502,7 +521,7 @@ class DoppioPreprocessingPipeline(PreprocessingPipeline):
         result = self.tc.submit_transfer(td)
         task_id = result['task_id']
         self._active_flow_runs[task_id] = {"batch": batch, "group_key": group_key, "transfer_only": True}
-        logger.info(f'Transfer submitted: {task_id} for group {group_key}')
+        logger.info(f'Transfer submitted: {task_id} for {label}')
 
         # Write manifest (no flow_run_id — no callback expected)
         manifest = self._build_manifest(group_key, batch, file_pairs)

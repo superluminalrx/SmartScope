@@ -76,7 +76,7 @@ def run_doppio_live(manifest_path: str, project_dir: str,
             # symlink them back in afterward.
             for dirname in ("Manifests", "Movies"):
                 project_level = Path(dirname)
-                old_in_job = Path(f"LivePreprocess/job001/{dirname}")
+                old_in_job = Path("LivePreprocess/job001/" + dirname)
                 if old_in_job.exists() and not project_level.exists():
                     old_in_job.rename(project_level)
                 project_level.mkdir(exist_ok=True)

@@ -200,7 +200,10 @@ class DoppioPreprocessingPipeline(PreprocessingPipeline):
             return str(hm.pk)
         elif self.cmd_data.grouping == 'per_group':
             # BIS group: all holes sharing the same group identifier
-            return str(getattr(hm, 'bis_group', hm.pk))
+            hole = getattr(hm, 'hole_id', None)
+            if hole and getattr(hole, 'bis_group', None):
+                return str(hole.bis_group)
+            return str(hm.pk)
         elif self.cmd_data.grouping == 'per_square':
             # All holes in the same square
             return str(hm.hole_id.square_id.pk) if hm.hole_id else str(hm.pk)

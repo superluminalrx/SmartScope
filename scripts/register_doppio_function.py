@@ -52,57 +52,91 @@ def run_doppio_live(manifest_path: str, project_dir: str,
             pid_file.unlink(missing_ok=True)
 
     if not orchestrator_running:
-        # Change to project directory (pipeliner expects this as cwd)
-        os.chdir(project_dir)
+        import subprocess
+        import textwrap
 
-        from pipeliner.project_graph import ProjectGraph, new_job_of_type
-        from pipeliner.job_manager import run_job as pipeliner_run_job
+        # Write a Python script that runs inside the Doppio environment
+        # to initialize the pipeliner project and launch the job.
+        # We can't import pipeliner directly because Globus Compute's
+        # Python environment doesn't have it installed.
+        launcher_script = _Path(project_dir) / '.smartscope_launch_live.py'
+        launcher_script.write_text(textwrap.dedent(f'''\
+            import json, os, sys
+            os.chdir({project_dir!r})
 
-        # Initialize or load the pipeliner project
-        pipeline_star = _Path(project_dir) / 'default_pipeline.star'
-        create_new = not pipeline_star.exists()
-        pipeline = ProjectGraph(
-            name='default',
-            pipeline_dir=project_dir,
-            read_only=False,
-            create_new=create_new,
+            from pathlib import Path
+            from pipeliner.project_graph import ProjectGraph, new_job_of_type
+            from pipeliner.job_manager import run_job
+
+            config = json.loads({_json.dumps(config)!r})
+
+            pipeline_star = Path("default_pipeline.star")
+            create_new = not pipeline_star.exists()
+            pipeline = ProjectGraph(
+                name="default",
+                pipeline_dir=".",
+                read_only=False,
+                create_new=create_new,
+            )
+
+            job = new_job_of_type("live.preprocessing")
+
+            # Enable SmartScope mode
+            if "smartscope_mode" in job.joboptions:
+                job.joboptions["smartscope_mode"].value = True
+
+            # Set job options from manifest config
+            direct_keys = [
+                "movie_pattern", "num_workers", "batch_size",
+                "worker_partition", "worker_account", "worker_time_limit",
+                "worker_mem", "pixel_size", "voltage", "cs",
+                "amplitude_contrast", "dose_per_frame", "gain_reference",
+                "motioncor_module", "motioncor_patches", "motioncor_binning",
+                "ctf_module", "ctf_box_size", "defocus_min", "defocus_max",
+                "picking_module", "picking_model", "picking_threshold",
+                "box_size", "extract_box_size", "extract_downscale",
+                "thumbnail_size",
+            ]
+            for key in direct_keys:
+                if key in job.joboptions and key in config:
+                    job.joboptions[key].value = config[key]
+
+            if "do_picking" in job.joboptions and "do_picking" in config:
+                job.joboptions["do_picking"].value = config["do_picking"]
+            if "do_extract" in job.joboptions and "do_extraction" in config:
+                job.joboptions["do_extract"].value = config["do_extraction"]
+
+            run_job(pipeline, job, ignore_invalid_joboptions=True)
+            pipeline.close()
+            print("PIPELINER_OK")
+        '''))
+
+        # Run via a shell script that loads the Doppio module first
+        shell_script = _Path(project_dir) / '.smartscope_launch_live.sh'
+        shell_script.write_text(
+            '#!/bin/bash\n'
+            'source /etc/profile\n'
+            'export MODULEPATH=$MODULEPATH:/home/group/superluminal/software/modulefiles\n'
+            'module load ccp/doppio\n'
+            f'exec python3 "{launcher_script}"\n'
         )
+        os.chmod(str(shell_script), 0o755)
 
-        # Create the live preprocessing job and set options from manifest
-        job = new_job_of_type('live.preprocessing')
+        result = subprocess.run(
+            [str(shell_script)],
+            capture_output=True, text=True, timeout=120,
+        )
+        if 'PIPELINER_OK' not in result.stdout:
+            raise RuntimeError(
+                f'Failed to launch pipeliner job:\n'
+                f'stdout: {result.stdout}\nstderr: {result.stderr}'
+            )
 
-        # Enable SmartScope mode
-        if 'smartscope_mode' in job.joboptions:
-            job.joboptions['smartscope_mode'].value = True
+        # Clean up temp scripts
+        launcher_script.unlink(missing_ok=True)
+        shell_script.unlink(missing_ok=True)
 
-        # Map manifest config keys to job option keys
-        # Keys match where job option name == config key
-        direct_keys = [
-            'movie_pattern', 'num_workers', 'batch_size',
-            'worker_partition', 'worker_account', 'worker_time_limit',
-            'worker_mem', 'pixel_size', 'voltage', 'cs',
-            'amplitude_contrast', 'dose_per_frame', 'gain_reference',
-            'motioncor_module', 'motioncor_patches', 'motioncor_binning',
-            'ctf_module', 'ctf_box_size', 'defocus_min', 'defocus_max',
-            'picking_module', 'picking_model', 'picking_threshold',
-            'box_size', 'extract_box_size', 'extract_downscale',
-            'thumbnail_size',
-        ]
-        for key in direct_keys:
-            if key in job.joboptions and key in config:
-                job.joboptions[key].value = config[key]
-
-        # Keys that need name mapping
-        if 'do_picking' in job.joboptions and 'do_picking' in config:
-            job.joboptions['do_picking'].value = config['do_picking']
-        if 'do_extract' in job.joboptions and 'do_extraction' in config:
-            job.joboptions['do_extract'].value = config['do_extraction']
-
-        # Run the job through pipeliner (launches orchestrator in background)
-        pipeliner_run_job(pipeline, job, ignore_invalid_joboptions=True)
-        pipeline.close()
-
-        # Update job_dir since pipeliner may have created a new one
+        # Update job_dir since pipeliner created a new one
         job_dir = find_job_dir()
 
     # --- Wait for .done.json ---

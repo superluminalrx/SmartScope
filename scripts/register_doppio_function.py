@@ -128,16 +128,26 @@ def run_doppio_live(manifest_path: str, project_dir: str,
             run_job(pipeline, job, ignore_invalid_joboptions=True)
             pipeline.close()
 
-            # Symlink project-level dirs into the job directory
-            # so the orchestrator finds them where it expects
+            # Move stashed files into the pipeliner-created job directory.
+            # Can't use symlinks — GridFTP won't follow them.
             job_dirs = sorted(Path("LivePreprocess").glob("job*"))
             if job_dirs:
                 job_dir = job_dirs[-1]
                 for dirname in ("Manifests", "Movies"):
-                    link = job_dir / dirname
-                    target = Path(dirname).resolve()
-                    if not link.exists() and target.exists():
-                        link.symlink_to(target)
+                    src = Path(dirname)
+                    dst = job_dir / dirname
+                    if src.exists():
+                        # Move contents into pipeliner's dir (which may already exist)
+                        dst.mkdir(exist_ok=True)
+                        for f in src.iterdir():
+                            target = dst / f.name
+                            if not target.exists():
+                                f.rename(target)
+                        # Remove the now-empty project-level dir
+                        try:
+                            src.rmdir()
+                        except OSError:
+                            pass
 
             print("PIPELINER_OK")
         '''))

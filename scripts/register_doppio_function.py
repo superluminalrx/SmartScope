@@ -86,13 +86,11 @@ def run_doppio_live(manifest_path: str, project_dir: str,
                     old_manifests.rename(stashed_manifests)
             stashed_manifests.mkdir(exist_ok=True)
 
-            # Remove the pre-existing job dir if empty
-            for d in (Path("LivePreprocess/job001"), Path("LivePreprocess")):
-                if d.exists():
-                    try:
-                        d.rmdir()
-                    except OSError:
-                        pass
+            # Remove the pre-existing LivePreprocess dir so pipeliner
+            # can create it fresh with correct ownership
+            lp = Path("LivePreprocess")
+            if lp.exists():
+                shutil.rmtree(str(lp), ignore_errors=True)
 
             pipeline_star = Path("default_pipeline.star")
             create_new = not pipeline_star.exists()

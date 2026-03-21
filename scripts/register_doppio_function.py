@@ -90,6 +90,10 @@ def run_doppio_live(manifest_path: str, project_dir: str,
         if "do_extract" in job.joboptions and "do_extraction" in config:
             job.joboptions["do_extract"].value = config["do_extraction"]
 
+        # Submit to SLURM queue (needs GPU)
+        if "do_queue" in job.joboptions:
+            job.joboptions["do_queue"].value = "Yes"
+
         # Schedule the job (creates job dir + config) but don't run yet
         process = schedule_job(pipeline, job, ignore_invalid_joboptions=True)
 
@@ -98,8 +102,10 @@ def run_doppio_live(manifest_path: str, project_dir: str,
         movies_path = job_dir / "movies.txt"
         movies_path.write_text("\\n".join(movies) + "\\n")
 
-        # Now run it
-        run_scheduled_job(pipeline, job, process, run_in_foreground=True)
+        # Run the scheduled job (submits to SLURM) and wait for completion
+        run_scheduled_job(pipeline, job, process)
+        wait_for_job_to_finish(job, ping=10.0, timeout=3600.0,
+                               error_on_fail=True)
         pipeline.close()
 
         print("JOB_DIR=" + str(job_dir))

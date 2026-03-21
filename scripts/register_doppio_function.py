@@ -61,14 +61,33 @@ def run_doppio_live(manifest_path: str, project_dir: str,
         # Python environment doesn't have it installed.
         launcher_script = _Path(project_dir) / '.smartscope_launch_live.py'
         launcher_script.write_text(textwrap.dedent(f'''\
-            import json, os, sys
+            import json, os, sys, shutil
+            from pathlib import Path
             os.chdir({project_dir!r})
 
-            from pathlib import Path
             from pipeliner.project_graph import ProjectGraph, new_job_of_type
             from pipeliner.job_manager import run_job
 
             config = json.loads({_json.dumps(config)!r})
+
+            # SmartScope's transfer step creates LivePreprocess/job001/Manifests
+            # and Movies/ before pipeliner runs. Move them to project-level
+            # dirs so pipeliner can create the job directory fresh, then
+            # symlink them back in afterward.
+            for dirname in ("Manifests", "Movies"):
+                project_level = Path(dirname)
+                old_in_job = Path(f"LivePreprocess/job001/{dirname}")
+                if old_in_job.exists() and not project_level.exists():
+                    old_in_job.rename(project_level)
+                project_level.mkdir(exist_ok=True)
+
+            # Remove the pre-existing job dir if empty
+            for d in (Path("LivePreprocess/job001"), Path("LivePreprocess")):
+                if d.exists():
+                    try:
+                        d.rmdir()
+                    except OSError:
+                        pass
 
             pipeline_star = Path("default_pipeline.star")
             create_new = not pipeline_star.exists()
@@ -108,6 +127,18 @@ def run_doppio_live(manifest_path: str, project_dir: str,
 
             run_job(pipeline, job, ignore_invalid_joboptions=True)
             pipeline.close()
+
+            # Symlink project-level dirs into the job directory
+            # so the orchestrator finds them where it expects
+            job_dirs = sorted(Path("LivePreprocess").glob("job*"))
+            if job_dirs:
+                job_dir = job_dirs[-1]
+                for dirname in ("Manifests", "Movies"):
+                    link = job_dir / dirname
+                    target = Path(dirname).resolve()
+                    if not link.exists() and target.exists():
+                        link.symlink_to(target)
+
             print("PIPELINER_OK")
         '''))
 

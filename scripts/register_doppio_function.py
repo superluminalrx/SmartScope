@@ -52,9 +52,10 @@ def run_doppio_live(manifest_path: str, project_dir: str,
         os.chdir({project_dir!r})
 
         from pipeliner.project_graph import ProjectGraph, new_job_of_type
-        from pipeliner.job_manager import run_job
+        from pipeliner.job_manager import schedule_job, run_scheduled_job, wait_for_job_to_finish
 
         config = json.loads({_json.dumps(config)!r})
+        movies = json.loads({_json.dumps(movies)!r})
 
         pipeline_star = Path("default_pipeline.star")
         create_new = not pipeline_star.exists()
@@ -70,8 +71,6 @@ def run_doppio_live(manifest_path: str, project_dir: str,
         # SmartScope mode: process movies file directly, no orchestrator
         if "smartscope_mode" in job.joboptions:
             job.joboptions["smartscope_mode"].value = True
-        if "movies_file" in job.joboptions:
-            job.joboptions["movies_file"].value = {str(movies_file)!r}
 
         # Set job options from manifest config
         direct_keys = [
@@ -91,14 +90,19 @@ def run_doppio_live(manifest_path: str, project_dir: str,
         if "do_extract" in job.joboptions and "do_extraction" in config:
             job.joboptions["do_extract"].value = config["do_extraction"]
 
-        # Run to completion (foreground)
-        run_job(pipeline, job, ignore_invalid_joboptions=True,
-                run_in_foreground=True)
+        # Schedule the job (creates job dir + config) but don't run yet
+        process = schedule_job(pipeline, job, ignore_invalid_joboptions=True)
+
+        # Write the movies file into the job directory before running
+        job_dir = Path(process.name)
+        movies_path = job_dir / "movies.txt"
+        movies_path.write_text("\\n".join(movies) + "\\n")
+
+        # Now run it
+        run_scheduled_job(pipeline, job, process, run_in_foreground=True)
         pipeline.close()
 
-        # Find the job directory that was created
-        job_dirs = sorted(Path("LivePreprocess").glob("job*"))
-        print("JOB_DIR=" + str(job_dirs[-1]) if job_dirs else "JOB_DIR=NONE")
+        print("JOB_DIR=" + str(job_dir))
     '''))
 
     shell_script = _Path(project_dir) / f'.smartscope_launch_{batch_id}.sh'

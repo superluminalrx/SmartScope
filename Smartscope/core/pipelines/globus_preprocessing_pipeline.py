@@ -633,7 +633,7 @@ class GlobusPreprocessingPipeline(PreprocessingPipeline):
         pngs_dir.mkdir(parents=True, exist_ok=True)
         count = 0
         for mic in results:
-            movie_stem = Path(mic.get('movie', '')).stem
+            movie_stem = Path(mic.get('movie_path', mic.get('movie', ''))).stem
             hm_name = self._find_hm_name_for_movie(movie_stem)
             if not hm_name:
                 continue
@@ -767,7 +767,7 @@ class GlobusPreprocessingPipeline(PreprocessingPipeline):
             if thumb:
                 src = f"{dest_globus_dir}/{thumb.lstrip('/')}"
                 # Put thumbnail in SmartScope's pngs/ directory
-                movie_stem = Path(mic.get('movie', '')).stem
+                movie_stem = Path(mic.get('movie_path', mic.get('movie', ''))).stem
                 hm_name = self._find_hm_name_for_movie(movie_stem)
                 if hm_name:
                     dst_local = Path(self.grid.directory) / 'pngs' / f'{hm_name}.png'
@@ -824,7 +824,7 @@ class GlobusPreprocessingPipeline(PreprocessingPipeline):
         holes_to_update = []
 
         for mic in results:
-            movie_stem = Path(mic.get('movie', '')).stem
+            movie_stem = Path(mic.get('movie_path', mic.get('movie', ''))).stem
             hm_name = self._find_hm_name_for_movie(movie_stem)
             if not hm_name:
                 logger.warning(f'No HighMagModel found for movie {movie_stem}')

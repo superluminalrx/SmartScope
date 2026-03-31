@@ -74,7 +74,7 @@ def run_doppio_live(manifest_path: str, project_dir: str,
         'do_extract': config.get('do_extraction', False),
         'extract_box_size': config.get('extract_box_size', 256),
         'extract_downscale': config.get('extract_downscale', 1),
-        'thumbnail_size': config.get('thumbnail_size', 512),
+        'thumbnail_size': config.get('thumbnail_size', 1024),
     }
     config_path = job_dir / 'live_config.json'
     config_path.write_text(_json.dumps(config_data, indent=2))
@@ -201,44 +201,13 @@ def run_doppio_live(manifest_path: str, project_dir: str,
     if state != 'COMPLETED':
         raise RuntimeError(f'SLURM job {slurm_job_id} ended with state: {state}')
 
-    # --- Read results and build return ---
-    # Use a helper script in Doppio env to read STAR with gemmi
-    results_file = job_dir / f'.results_{batch_id}.json'
-    read_script = _Path(project_dir) / f'.read_results_{batch_id}.sh'
-    read_script.write_text(
-        '#!/bin/bash\n'
-        'source /etc/profile\n'
-        'export MODULEPATH=$MODULEPATH:/home/group/superluminal/software/modulefiles\n'
-        'module load ccp/doppio\n'
-        f'python3 -c "\n'
-        f'import gemmi, json\n'
-        f'from pathlib import Path\n'
-        f'star = Path(\'{job_dir}/micrographs_ctf.star\')\n'
-        f'batch_movies = set(Path(m).name for m in {movies!r})\n'
-        f'results = []\n'
-        f'if star.exists():\n'
-        f'    doc = gemmi.cif.read(str(star))\n'
-        f'    block = doc.find_block(\'micrographs\')\n'
-        f'    if block:\n'
-        f'        tags = block.find([\'_rlnMicrographMovieName\',\'_rlnMicrographName\',\'_rlnDefocusU\',\'_rlnDefocusV\',\'_rlnDefocusAngle\',\'_rlnCtfMaxResolution\',\'_rlnCtfFigureOfMerit\',\'_rlnAccumMotionTotal\',\'_rlnCtfIceThickness\'])\n'
-        f'        for row in tags:\n'
-        f'            if Path(row[0]).name not in batch_movies: continue\n'
-        f'            stem = Path(row[1]).stem\n'
-        f'            movie_stem = Path(row[0]).stem\n'
-        f'            thumb = Path(\'{job_dir}/Thumbnails/\' + stem + \'.png\')\n'
-        f'            ctf_thumb = Path(\'{job_dir}/CtfThumbnails/\' + movie_stem + \'_ctf.png\')\n'
-        f'            results.append(dict(movie=row[0],micrograph=row[1],defocus_u=float(row[2]) if row[2]!=\'.\'else 0.0,defocus_v=float(row[3]) if row[3]!=\'.\'else 0.0,defocus_angle=float(row[4]) if row[4]!=\'.\'else 0.0,ctf_max_resolution=float(row[5]) if row[5]!=\'.\'else 999.0,ctf_fom=float(row[6]) if row[6]!=\'.\'else 0.0,total_motion=float(row[7]) if row[7]!=\'.\'else 0.0,ice_thickness=float(row[8]) if row[8]!=\'.\'else 0.0,thumbnail=str(thumb.relative_to(Path(\'{project_dir}\'))) if thumb.exists() else \'\',ctf_thumbnail=str(ctf_thumb.relative_to(Path(\'{project_dir}\'))) if ctf_thumb.exists() else \'\'))\n'
-        f'Path(\'{results_file}\').write_text(json.dumps(results))\n'
-        f'"\n'
-    )
-    os.chmod(str(read_script), 0o755)
-    subprocess.run([str(read_script)], capture_output=True, timeout=60)
-    read_script.unlink(missing_ok=True)
-
+    # --- Read results from finalize output ---
+    # The finalize stage writes updated results (with shape, thumbnails, etc.)
+    # back to the extract_results JSON file.
+    extract_results = batches_dir / f'{batch_id}_extract.json'
     results = []
-    if results_file.exists():
-        results = _json.loads(results_file.read_text())
-        results_file.unlink(missing_ok=True)
+    if extract_results.exists():
+        results = _json.loads(extract_results.read_text())
 
     # Build Globus transfer items using thumbnail_destinations from manifest
     fs_root = destination_filesystem_root.rstrip('/')
@@ -247,7 +216,7 @@ def run_doppio_live(manifest_path: str, project_dir: str,
 
     transfer_items = []
     for mic in results:
-        movie_name = _Path(mic.get('movie', '')).name
+        movie_name = _Path(mic.get('movie_path', mic.get('movie', ''))).name
         dests = thumb_dests.get(movie_name, {})
         thumb = mic.get('thumbnail', '')
         if thumb and dests.get('png'):

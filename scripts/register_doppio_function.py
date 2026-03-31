@@ -274,7 +274,6 @@ if __name__ == '__main__':
     )
     cc = ComputeClientV2(authorizer=authorizer)
 
-    # Use SDK's FunctionRegistrationData for proper serialization
     reg_data = FunctionRegistrationData(function=run_doppio_live)
     result = cc.post('/v3/functions', data=reg_data.to_dict())
     func_id = result.data['function_uuid']

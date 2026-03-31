@@ -212,6 +212,8 @@ def run_doppio_live(manifest_path: str, project_dir: str,
     # Build Globus transfer items using thumbnail_destinations from manifest
     fs_root = destination_filesystem_root.rstrip('/')
     hpc_globus_base = '/' + project_dir.replace(fs_root, '').strip('/')
+    # Thumbnail paths from finalize are relative to job_dir, not project_dir
+    job_rel = str(job_dir).replace(project_dir, '').strip('/')
     thumb_dests = manifest.get('thumbnail_destinations', {})
 
     transfer_items = []
@@ -221,13 +223,13 @@ def run_doppio_live(manifest_path: str, project_dir: str,
         thumb = mic.get('thumbnail', '')
         if thumb and dests.get('png'):
             transfer_items.append({
-                'source_path': f'{hpc_globus_base}/{thumb}',
+                'source_path': f'{hpc_globus_base}/{job_rel}/{thumb}',
                 'destination_path': dests['png'],
             })
         ctf_thumb = mic.get('ctf_thumbnail', '')
         if ctf_thumb and dests.get('ctf'):
             transfer_items.append({
-                'source_path': f'{hpc_globus_base}/{ctf_thumb}',
+                'source_path': f'{hpc_globus_base}/{job_rel}/{ctf_thumb}',
                 'destination_path': dests['ctf'],
             })
 

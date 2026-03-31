@@ -22,7 +22,7 @@
       "WaitTime": 7200,
       "Parameters": {
         "endpoint.$": "$.input.compute_endpoint",
-        "function": "8ce42290-44b3-4a0e-a4ff-2b384c1d7262",
+        "function": "18f5c565-e4f2-4fdf-8326-b4c91d39a215",
         "kwargs.$": "$.input.compute_kwargs"
       },
       "ResultPath": "$.ComputeResult",

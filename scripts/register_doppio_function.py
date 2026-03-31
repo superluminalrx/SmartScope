@@ -76,7 +76,7 @@ def run_doppio_live(manifest_path: str, project_dir: str,
         'extract_downscale': config.get('extract_downscale', 1),
         'thumbnail_size': config.get('thumbnail_size', 1024),
     }
-    config_path = job_dir / 'live_config.json'
+    config_path = job_dir / 'batches' / f'{batch_id}_config.json'
     config_path.write_text(_json.dumps(config_data, indent=2))
 
     # Write movies file

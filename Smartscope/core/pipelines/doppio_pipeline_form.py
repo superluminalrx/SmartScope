@@ -6,15 +6,6 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
-# Fields that should only show when mode = "transfer_and_process"
-PROCESS_ONLY_FIELDS = {
-    'grouping', 'globus_compute_endpoint_id', 'compute_function_id', 'globus_flow_id',
-    'do_motioncor', 'do_ctf', 'do_miffi', 'do_picking', 'do_extraction',
-    'pixel_size_override', 'dose_per_frame', 'box_size',
-    'motioncor_binning', 'motioncor_patches',
-    'picking_threshold', 'picking_model',
-    'extract_box_size', 'extract_downscale',
-}
 
 # Default token file and client ID
 DEFAULT_TOKEN_FILE = '/opt/config/smartscope_tokens.json'
@@ -95,24 +86,7 @@ def _get_globus_choices():
     return choices
 
 
-class DoppioPipelineForm(forms.Form):
-    mode = forms.ChoiceField(
-        choices=[
-            ('transfer_and_process', 'Transfer and Process (Globus Transfer + Doppio)'),
-            ('transfer_only', 'Transfer Only (Globus Transfer to HPC)'),
-        ],
-        widget=forms.Select(attrs={
-            'onchange': (
-                'var p=this.value==="transfer_and_process";'
-                'document.querySelectorAll("[data-process-only]").forEach(function(el){'
-                'var w=el.closest(".my-1")||el.closest(".input-group");'
-                'if(w){w.style.opacity=p?"1":"0.4";'
-                'w.style.pointerEvents=p?"auto":"none";}'
-                '})'
-            ),
-        }),
-        help_text='Transfer only moves frames to HPC. Transfer and process also runs Doppio via Globus Compute.'
-    )
+class GlobusPipelineForm(forms.Form):
 
     grouping = forms.ChoiceField(
         choices=[
@@ -139,12 +113,6 @@ class DoppioPipelineForm(forms.Form):
         label='Globus Compute Endpoint',
         widget=forms.TextInput(attrs={'placeholder': 'Run: globus-compute-endpoint list (on HPC)'}),
         help_text='UUID from "globus-compute-endpoint list" on the HPC.',
-    )
-
-    compute_function_id = forms.CharField(
-        label='Compute Function ID',
-        initial='98ce0589-f233-4bda-842c-c73b109dff77',
-        help_text='UUID of the registered Globus Compute function for Doppio processing.',
     )
 
     globus_flow_id = forms.ChoiceField(
@@ -313,7 +281,3 @@ class DoppioPipelineForm(forms.Form):
             elif not isinstance(widget, forms.RadioSelect):
                 widget.attrs['class'] = 'form-control'
             visible.field.required = False
-
-            # Tag processing-only fields so JS can toggle them
-            if visible.name in PROCESS_ONLY_FIELDS:
-                widget.attrs['data-process-only'] = 'true'

@@ -7,7 +7,6 @@ logger = logging.getLogger(__name__)
 
 
 class DoppioCmdKwargs(BaseModel):
-    mode: str = "transfer_and_process"  # "transfer_only" | "transfer_and_process"
 
     # How to group images into flow runs
     #   per_micrograph: one flow per high-mag image (immediate)
@@ -15,11 +14,8 @@ class DoppioCmdKwargs(BaseModel):
     #   per_square: one flow per grid square (wait until square is done)
     grouping: str = "per_group"
 
-    # Globus Compute endpoint where Doppio jobs run
+    # Globus Compute endpoint where jobs run
     globus_compute_endpoint_id: str = ""
-
-    # Registered Globus Compute function ID for Doppio processing
-    compute_function_id: str = "98ce0589-f233-4bda-842c-c73b109dff77"
 
     # Globus Flow ID (deployed flow that chains transfer -> compute -> transfer)
     globus_flow_id: str = ""

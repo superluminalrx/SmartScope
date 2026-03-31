@@ -10,14 +10,15 @@ from Smartscope.lib.logger import add_log_handlers
 
 logger = logging.getLogger(__name__)
 
-from .pipelines import PreprocessingPipelineCmd, SmartscopePreprocessingPipeline, CryoSPARCPipeline, NextPYPPreprocessingPipeline, NextPYPPreprocessingCmdKwargs, DoppioPreprocessingPipeline
+from .pipelines import PreprocessingPipelineCmd, SmartscopePreprocessingPipeline, CryoSPARCPipeline, NextPYPPreprocessingPipeline, NextPYPPreprocessingCmdKwargs, GlobusPreprocessingPipeline
 
 
 PREPROCESSING_PIPELINE_FACTORY = {
     "smartscopePipeline" : SmartscopePreprocessingPipeline,
     # "cryoSPARC" : CryoSPARCPipeline,
     "nextpypPipeline" : NextPYPPreprocessingPipeline,
-    "doppioPipeline" : DoppioPreprocessingPipeline,
+    "globusPipeline" : GlobusPreprocessingPipeline,
+    "doppioPipeline" : GlobusPreprocessingPipeline,  # backwards compat
 }
 
 def load_preprocessing_pipeline(file:Path):

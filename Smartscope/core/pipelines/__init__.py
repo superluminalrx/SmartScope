@@ -9,4 +9,4 @@ from .cryosparc_live import CryoSPARCPipeline
 from .nextpyp_preprocessing_pipeline import NextPYPPreprocessingPipeline
 from .nextpyp_preprocessing_pipeline_form import NextPYPPreprocessingPipelineForm
 from .nextpyp_preprocessing_cmd_kwargs import NextPYPPreprocessingCmdKwargs
-from .doppio_preprocessing_pipeline import DoppioPreprocessingPipeline
+from .globus_preprocessing_pipeline import GlobusPreprocessingPipeline

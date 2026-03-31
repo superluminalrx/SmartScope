@@ -17,7 +17,7 @@ from Smartscope.core.models.models_actions import update_fields
 
 from .preprocessing_pipeline import PreprocessingPipeline
 from .doppio_cmd_kwargs import DoppioCmdKwargs
-from .doppio_pipeline_form import DoppioPipelineForm
+from .doppio_pipeline_form import GlobusPipelineForm
 
 logger = logging.getLogger(__name__)
 
@@ -106,31 +106,25 @@ def _container_to_globus_path(container_path: str, source_base_path: str,
 
 
 def _globus_dest_path(container_path: str, destination_base_path: str,
-                      project_path: str, grid_id: str) -> str:
+                      project_path: str, square: str, group: str) -> str:
     """Build destination path on HPC.
 
-    e.g. /data/programs/Lodos/Apoferritin/Movies/grid_1/frame.tif
-
-    Args:
-        container_path: Frame path inside container (e.g. /mnt/data/.../frame.tif)
-        destination_base_path: HPC root (e.g. /data/programs)
-        project_path: User-defined project path from slot mapping (e.g. Lodos/Apoferritin)
-        grid_id: Grid identifier for subdirectory
+    e.g. /CryoEM/Projects/Rori_SUN-0018080/Movies/Square-14/Group-42/frame.tif
     """
     filename = Path(container_path).name
     return (f"{destination_base_path.rstrip('/')}/"
             f"{project_path.strip('/')}/"
-            f"Movies/{grid_id}/{filename}")
+            f"Movies/{square}/{group}/{filename}")
 
 
-class DoppioPreprocessingPipeline(PreprocessingPipeline):
+class GlobusPreprocessingPipeline(PreprocessingPipeline):
 
-    verbose_name = 'Doppio Preprocessing Pipeline (Globus)'
-    name = 'doppioPipeline'
-    description = 'GPU preprocessing via Globus Flows to transfer and process on HPC with Doppio.'
+    verbose_name = 'Globus Preprocessing Pipeline'
+    name = 'globusPipeline'
+    description = 'Globus Transfer & Globus Compute via Globus Flows. Users can write and register their own flows to perform any combination of transfer, compute, and return.'
 
     cmdkwargs_handler = DoppioCmdKwargs
-    pipeline_form = DoppioPipelineForm
+    pipeline_form = GlobusPipelineForm
 
     incomplete_processes: List = []
     to_update: List = []
@@ -172,7 +166,7 @@ class DoppioPreprocessingPipeline(PreprocessingPipeline):
         self.tc = _build_transfer_client(self.cmd_data)
         logger.info("Globus Transfer client initialized")
 
-        if self.cmd_data.mode == 'transfer_and_process' and self.cmd_data.globus_flow_id:
+        if self.cmd_data.globus_flow_id:
             try:
                 self.fc = _build_flows_client(self.cmd_data)
                 # Also build a general FlowsClient for checking run status
@@ -233,8 +227,7 @@ class DoppioPreprocessingPipeline(PreprocessingPipeline):
                         f'no Doppio project assigned, skipping.')
             return
 
-        logger.info(f'Starting Doppio pipeline: mode={self.cmd_data.mode}, '
-                     f'grouping={self.cmd_data.grouping}, '
+        logger.info(f'Starting Globus pipeline: grouping={self.cmd_data.grouping}, '
                      f'project={self.project_path}, grid={self.grid.grid_id}')
         self._init_globus_clients()
 
@@ -264,8 +257,8 @@ class DoppioPreprocessingPipeline(PreprocessingPipeline):
             # Check for completed flow runs
             self._check_flow_runs()
 
-            # Poll for Doppio results (.done.json files on HPC)
-            self._poll_for_results()
+            # Move any thumbnails from frames mount to data mount
+            self._sync_thumbnails()
 
             # Done?
             self.grid.refresh_from_db()
@@ -294,21 +287,22 @@ class DoppioPreprocessingPipeline(PreprocessingPipeline):
     # ---- Submission ----
 
     def _flow_label(self, group_key: str, batch: List) -> str:
-        """Build a descriptive label: Session_Grid_Square_BISGroup."""
-        session = self.grid.session_id.session_id
-        grid = self.grid.grid_id
-        # Get square number from first item's hole
+        """Build a human-readable label like SmartScope_GridName_Square-3_Group-42."""
+        grid = self.grid.name
         square = ''
         if batch:
             hole = getattr(batch[0], 'hole_id', None)
             if hole:
                 sq = getattr(hole, 'square_id', None)
                 if sq:
-                    square = str(sq.number)
-        parts = [session, grid]
+                    square = f'Square-{sq.number}'
+        parts = ['SmartScope', grid]
         if square:
-            parts.append(f'sq{square}')
-        parts.append(group_key)
+            parts.append(square)
+        if self.cmd_data.grouping == 'per_micrograph':
+            parts.append(f'Mic-{batch[0].number}' if batch else group_key)
+        else:
+            parts.append(f'Group-{group_key}')
         return '_'.join(parts)
 
     def _submit_group(self, group_key: str, batch: List):
@@ -317,22 +311,30 @@ class DoppioPreprocessingPipeline(PreprocessingPipeline):
         logger.info(f'Submitting {label}: {len(batch)} images')
         self._submitted_groups.add(group_key)
 
+        # Get square and group for destination path
+        square = 'Unknown'
+        if batch:
+            hole = getattr(batch[0], 'hole_id', None)
+            if hole:
+                sq = getattr(hole, 'square_id', None)
+                if sq:
+                    square = f'Square-{sq.number}'
+        group = f'Group-{group_key}'
+
         # Build file list from actual frame paths (include .mdoc sidecar files)
         file_pairs = []
         for hm in batch:
             if not hm.frames:
                 logger.warning(f'No frames file for {hm.pk}, skipping')
                 continue
-            # Full container path to the frame file
             container_path = str(self.frames_dir / hm.frames)
 
             src = _container_to_globus_path(container_path, self.cmd_data.source_base_path,
                                                 self.container_frames_root)
             dst = _globus_dest_path(container_path, self.cmd_data.destination_base_path,
-                                    self.project_path, self.grid.grid_id)
+                                    self.project_path, square, group)
             file_pairs.append((src, dst))
 
-            # Also transfer the .mdoc sidecar if it exists
             mdoc_path = container_path + '.mdoc'
             if Path(mdoc_path).exists():
                 mdoc_src = _container_to_globus_path(mdoc_path, self.cmd_data.source_base_path,
@@ -340,7 +342,7 @@ class DoppioPreprocessingPipeline(PreprocessingPipeline):
                 mdoc_dst = dst + '.mdoc'
                 file_pairs.append((mdoc_src, mdoc_dst))
 
-        if self.cmd_data.mode == 'transfer_and_process' and self.fc:
+        if self.fc:
             self._start_flow_run(group_key, batch, file_pairs, label)
         else:
             self._start_transfer_only(group_key, batch, file_pairs, label)
@@ -354,7 +356,7 @@ class DoppioPreprocessingPipeline(PreprocessingPipeline):
         - The flow_run_id to callback when processing is done
         - Any metadata overrides (pixel size, voltage, etc.)
         """
-        batch_id = f"{self.grid.grid_id}_{group_key}"
+        batch_id = self._flow_label(group_key, batch)
 
         # Movie paths relative to Doppio project dir
         # (SmartScopeMode resolves them to absolute via project_dir)
@@ -407,6 +409,22 @@ class DoppioPreprocessingPipeline(PreprocessingPipeline):
         config["picking_model"] = self.cmd_data.picking_model
         config["extract_box_size"] = self.cmd_data.extract_box_size
         config["extract_downscale"] = self.cmd_data.extract_downscale
+        # Thumbnail size: Doppio defaults to 1024 in Y (height), no override needed.
+
+        # Map movie filenames to Globus destination paths for thumbnails.
+        # The compute function uses this to put thumbnails directly where SmartScope expects them.
+        grid_globus = _container_to_globus_path(
+            str(self.grid.directory), self.cmd_data.source_base_path,
+            self.container_data_root
+        )
+        thumbnail_map = {}
+        for hm in batch:
+            if hm.frames:
+                movie_name = Path(hm.frames).name
+                thumbnail_map[movie_name] = {
+                    "png": f"{grid_globus}/pngs/{hm.name}.png",
+                    "ctf": f"{grid_globus}/{hm.name}/ctf.png",
+                }
 
         return {
             "batch_id": batch_id,
@@ -414,6 +432,7 @@ class DoppioPreprocessingPipeline(PreprocessingPipeline):
             "movies": movies,
             "config": config,
             "grid_id": self.grid.grid_id,
+            "thumbnail_destinations": thumbnail_map,
         }
 
     def _transfer_manifest(self, manifest: dict):
@@ -457,7 +476,7 @@ class DoppioPreprocessingPipeline(PreprocessingPipeline):
         fs_root = self.cmd_data.destination_filesystem_root.rstrip('/')
         dest_fs_dir = f"{fs_root}/{dest_globus_dir.lstrip('/')}"
 
-        batch_id = f"{self.grid.grid_id}_{group_key}"
+        batch_id = self._flow_label(group_key, batch)
         manifest_globus_path = (f"{dest_globus_dir}/LivePreprocess/job001/"
                                 f"Manifests/{batch_id}.json")
         manifest_path_on_hpc = (f"{dest_fs_dir}/LivePreprocess/job001/"
@@ -482,7 +501,6 @@ class DoppioPreprocessingPipeline(PreprocessingPipeline):
             "source_collection": self.cmd_data.source_collection_id,
             "destination_collection": self.cmd_data.destination_collection_id,
             "compute_endpoint": self.cmd_data.globus_compute_endpoint_id,
-            "compute_function_id": self.cmd_data.compute_function_id,
             "compute_kwargs": {
                 "manifest_path": manifest_path_on_hpc,
                 "project_dir": dest_fs_dir,
@@ -497,7 +515,7 @@ class DoppioPreprocessingPipeline(PreprocessingPipeline):
             "results_label": f"Results {label}",
         }
 
-        run = self.fc.run_flow(body={"input": flow_input})
+        run = self.fc.run_flow(body={"input": flow_input}, label=label[:64])
         run_id = run["run_id"]
         self._active_flow_runs[run_id] = {"batch": batch, "group_key": group_key}
         logger.info(f'Flow run started: {run_id} for {label}')
@@ -553,20 +571,87 @@ class DoppioPreprocessingPipeline(PreprocessingPipeline):
 
         if status == "SUCCEEDED":
             logger.info(f'Flow run {run_id} completed for group {info["group_key"]}')
-            # Extract done_data from flow results
-            details = run.get("details", {})
-            results_list = details.get("results", [])
-            if results_list:
-                done_data = results_list[0].get("output", {})
+            # Results are in the .done.json transferred back by the flow.
+            # It lands at the Globus destination path on the DTN filesystem.
+            batch_id = self._flow_label(info['group_key'], info.get('batch', []))
+            done_path = (Path(self.container_frames_root) /
+                         "LivePreprocess" / "job001" / "Manifests" /
+                         f"{batch_id}.done.json")
+            if done_path.exists():
+                done_data = json.loads(done_path.read_text())
                 self._update_db_from_done(done_data)
-                self._transfer_thumbnails(done_data,
-                    f"{self.cmd_data.destination_base_path.rstrip('/')}/{self.project_path.strip('/')}")
+                self._move_thumbnails(done_data)
+                logger.info(f'Updated DB from {done_path}')
+            else:
+                logger.warning(f'Flow completed but .done.json not found at {done_path}')
             del self._active_flow_runs[run_id]
 
         elif status in ("FAILED", "CANCELLED"):
             logger.error(f'Flow run {run_id} {status} for group {info["group_key"]}')
             del self._active_flow_runs[run_id]
             self._submitted_groups.discard(info["group_key"])
+
+    def _sync_thumbnails(self):
+        """Move any thumbnails sitting on the frames mount to the data mount."""
+        import shutil
+        grid_rel = str(self.grid.directory)[len(self.container_data_root):].lstrip('/')
+        frames_pngs = Path(self.container_frames_root) / grid_rel / 'pngs'
+        data_pngs = Path(self.grid.directory) / 'pngs'
+        if not frames_pngs.exists():
+            return
+        data_pngs.mkdir(parents=True, exist_ok=True)
+        count = 0
+        for f in frames_pngs.glob('*.png'):
+            dst = data_pngs / f.name
+            if not dst.exists():
+                shutil.move(str(f), str(dst))
+                count += 1
+        # CTF thumbnails
+        frames_grid = frames_pngs.parent
+        data_grid = Path(self.grid.directory)
+        for d in frames_grid.iterdir():
+            ctf = d / 'ctf.png'
+            if d.is_dir() and ctf.exists():
+                dst = data_grid / d.name / 'ctf.png'
+                if not dst.exists():
+                    dst.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.move(str(ctf), str(dst))
+                    count += 1
+        if count:
+            logger.info(f'Synced {count} thumbnails to {data_pngs}')
+
+    def _move_thumbnails(self, done_data: dict):
+        """Move thumbnails from Globus landing path (frames mount) to SmartScope data dir."""
+        import shutil
+        results = done_data.get('results', [])
+        # Globus transferred to the frames mount at the same relative path as grid.directory
+        # e.g. frames mount: /mnt/arctica/Superluminal/SmartScope/20260316_.../1_Rori_.../pngs/
+        #      data mount:   /mnt/data/Superluminal/20260316_.../1_Rori_.../pngs/
+        grid_rel = str(self.grid.directory)[len(self.container_data_root):].lstrip('/')
+        frames_grid_dir = Path(self.container_frames_root) / grid_rel
+        pngs_dir = Path(self.grid.directory) / 'pngs'
+        pngs_dir.mkdir(parents=True, exist_ok=True)
+        count = 0
+        for mic in results:
+            movie_stem = Path(mic.get('movie', '')).stem
+            hm_name = self._find_hm_name_for_movie(movie_stem)
+            if not hm_name:
+                continue
+            # Micrograph thumbnail
+            src = frames_grid_dir / 'pngs' / f'{hm_name}.png'
+            dst = pngs_dir / f'{hm_name}.png'
+            if src.exists():
+                shutil.move(str(src), str(dst))
+                count += 1
+            # CTF thumbnail
+            src = frames_grid_dir / hm_name / 'ctf.png'
+            dst = Path(self.grid.directory) / hm_name / 'ctf.png'
+            if src.exists():
+                dst.parent.mkdir(parents=True, exist_ok=True)
+                shutil.move(str(src), str(dst))
+                count += 1
+        if count:
+            logger.info(f'Moved {count} thumbnails to {pngs_dir}')
 
     # ---- Results polling & DB updates ----
 
@@ -759,8 +844,8 @@ class DoppioPreprocessingPipeline(PreprocessingPipeline):
             hm.angast = mic.get('defocus_angle', 0.0)
             hm.ctffit = mic.get('ctf_max_resolution', 999.0)
             hm.ice_thickness = int(round(mic.get('ice_thickness', 0.0) / 10))
-            hm.shape_x = mic.get('shape_x', 0)
-            hm.shape_y = mic.get('shape_y', 0)
+            hm.shape_x = mic.get('shape_x', 0) or 0
+            hm.shape_y = mic.get('shape_y', 0) or 0
             hm.pixel_size = pixel_size
             hm.status = 'completed'
             hm.completion_time = timezone.now()

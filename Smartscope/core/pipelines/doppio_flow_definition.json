@@ -1,9 +1,8 @@
 {
-  "Comment": "SmartScope -> Doppio preprocessing flow. Transfer frames to HPC, run Doppio, transfer results back.",
+  "Comment": "SmartScope Globus Preprocessing Flow: transfer files to HPC, run a command via Globus Compute, transfer results back. Users can register their own flows with different compute functions.",
   "StartAt": "TransferToHPC",
   "States": {
     "TransferToHPC": {
-      "Comment": "Transfer frames + manifest from microscope DTN to HPC",
       "Type": "Action",
       "ActionUrl": "https://transfer.actions.globus.org/transfer",
       "ActionScope": "urn:globus:auth:scope:transfer.api.globus.org:all",
@@ -14,24 +13,22 @@
         "label.$": "$.input.label"
       },
       "ResultPath": "$.TransferToHPC",
-      "Next": "RunDoppio"
+      "Next": "RunCommand"
     },
-    "RunDoppio": {
-      "Comment": "Start Doppio orchestrator + wait for batch results via Globus Compute",
+    "RunCommand": {
       "Type": "Action",
       "ActionUrl": "https://compute.actions.globus.org",
       "ActionScope": "https://auth.globus.org/scopes/facd7ccc-c5f4-42aa-916b-a0e270e2c2a9/all",
-      "WaitTime": 3600,
+      "WaitTime": 7200,
       "Parameters": {
         "endpoint.$": "$.input.compute_endpoint",
-        "function.$": "$.input.compute_function_id",
+        "function": "bb8c3e98-d930-4b85-82b2-beefef7141bf",
         "kwargs.$": "$.input.compute_kwargs"
       },
       "ResultPath": "$.ComputeResult",
       "Next": "TransferResultsBack"
     },
     "TransferResultsBack": {
-      "Comment": "Transfer .done.json + thumbnails from HPC back to DTN",
       "Type": "Action",
       "ActionUrl": "https://transfer.actions.globus.org/transfer",
       "ActionScope": "urn:globus:auth:scope:transfer.api.globus.org:all",

@@ -1,5 +1,5 @@
 
-from typing import Dict
+from typing import Any, Dict
 from pydantic import BaseModel
 import logging
 
@@ -50,24 +50,10 @@ class GlobusPipelineConfig(BaseModel):
     max_concurrent_flows: int = 1
     group_settle_seconds: int = 60  # Wait N seconds after newest image before submitting a group
 
-    # ===== Pipeline stages (checkboxes) =====
-    do_motioncor: bool = True
-    do_ctf: bool = True
-    do_miffi: bool = False
-    do_picking: bool = True
-    do_extraction: bool = True
-
-    # ===== Processing parameters =====
-    # These are user-provided — can't be derived from microscope metadata
-    pixel_size_override: float = 0.0  # 0 = use SmartScope value
-    dose_per_frame: float = 1.0
-    box_size: int = 200
-    motioncor_binning: float = 1.0
-    motioncor_patches: int = 5
-    picking_threshold: float = 0.3
-    picking_model: str = ""  # path to crYOLO model on HPC, empty = general model
-    extract_box_size: int = 256
-    extract_downscale: int = 1
+    # ===== Extra config passed through to the compute function =====
+    # Key-value pairs merged into the manifest "config" dict.
+    # The compute function defines what it expects; SmartScope passes these through.
+    extra_config: Dict[str, Any] = {}
 
     # ===== Globus Auth =====
     globus_client_id: str = "7df9d534-fb19-4d79-8e83-642f1cdcf081"

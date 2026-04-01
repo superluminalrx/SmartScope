@@ -178,7 +178,10 @@ class GlobusPreprocessingPipeline(PreprocessingPipeline):
         self.tc = _build_transfer_client(self.cmd_data)
         logger.info("Globus Transfer client initialized")
 
-        if self.cmd_data.globus_flow_id:
+        if not self.cmd_data.globus_flow_id:
+            logger.info("No flow ID configured — running in transfer-only mode "
+                        "(files transferred to HPC, no remote processing)")
+        else:
             try:
                 self.fc = _build_flows_client(self.cmd_data)
                 # Also build a general FlowsClient for checking run status
@@ -196,7 +199,7 @@ class GlobusPreprocessingPipeline(PreprocessingPipeline):
                     self.fc_general = FlowsClient(authorizer=authorizer)
                 logger.info("Globus Flows client initialized")
             except Exception as e:
-                logger.warning(f"Could not init Flows client: {e}. Falling back to transfer_only.")
+                logger.warning(f"Could not init Flows client: {e}. Falling back to transfer-only mode.")
 
     # ---- Grouping Logic ----
 
@@ -433,33 +436,13 @@ class GlobusPreprocessingPipeline(PreprocessingPipeline):
             "output_dir": output_dir,
         }
 
-        # Pixel size
-        if self.cmd_data.pixel_size_override > 0:
-            config["pixel_size"] = self.cmd_data.pixel_size_override
-        elif hasattr(self.detector, 'pixel_size') and self.detector.pixel_size:
+        # Microscope-derived values (SmartScope provides these automatically)
+        if hasattr(self.detector, 'pixel_size') and self.detector.pixel_size:
             config["pixel_size"] = float(self.detector.pixel_size)
-
-        # Microscope settings
         if hasattr(self.microscope, 'voltage') and self.microscope.voltage:
             config["voltage"] = int(self.microscope.voltage)
         if hasattr(self.microscope, 'spherical_abberation') and self.microscope.spherical_abberation:
             config["cs"] = float(self.microscope.spherical_abberation)
-
-        # Processing parameters from form
-        if self.cmd_data.dose_per_frame > 0:
-            config["dose_per_frame"] = self.cmd_data.dose_per_frame
-        config["motioncor_binning"] = self.cmd_data.motioncor_binning
-        config["motioncor_patches"] = self.cmd_data.motioncor_patches
-        config["do_motioncor"] = self.cmd_data.do_motioncor
-        config["do_ctf"] = self.cmd_data.do_ctf
-        config["do_miffi"] = self.cmd_data.do_miffi
-        config["do_picking"] = self.cmd_data.do_picking
-        config["do_extraction"] = self.cmd_data.do_extraction
-        config["picking_threshold"] = self.cmd_data.picking_threshold
-        config["picking_model"] = self.cmd_data.picking_model
-        config["extract_box_size"] = self.cmd_data.extract_box_size
-        config["extract_downscale"] = self.cmd_data.extract_downscale
-        # Gain reference — transferred to project root on HPC
         if gain_ref:
             config["gain_reference"] = gain_ref
         if hasattr(self.detector, 'gain_rot') and self.detector.gain_rot is not None:
@@ -467,7 +450,9 @@ class GlobusPreprocessingPipeline(PreprocessingPipeline):
         # gain_flip in DB is IMOD convention; MotionCor3 uses RELION convention (inverted)
         if hasattr(self.detector, 'gain_flip'):
             config["gain_flip"] = int(not self.detector.gain_flip)
-        # Thumbnail size: Default thumbnail size is 1024 in Y (height), no override needed.
+
+        # Merge user-provided extra config (processing params for the compute function)
+        config.update(self.cmd_data.extra_config)
 
         # Map movie filenames to Globus destination paths for thumbnails.
         # The compute function uses this to put thumbnails directly where SmartScope expects them.
@@ -738,7 +723,7 @@ class GlobusPreprocessingPipeline(PreprocessingPipeline):
         from django.contrib.contenttypes.models import ContentType
 
         results = done_data.get('results', [])
-        pixel_size = self.cmd_data.pixel_size_override or (
+        pixel_size = self.cmd_data.extra_config.get('pixel_size', 0) or (
             float(self.detector.pixel_size) if hasattr(self.detector, 'pixel_size')
             and self.detector.pixel_size else 1.0
         )

@@ -45,6 +45,7 @@ class DoppioCmdKwargs(BaseModel):
 
     # ===== Concurrency =====
     max_concurrent_flows: int = 1
+    group_settle_seconds: int = 60  # Wait N seconds after newest image before submitting a group
 
     # ===== Pipeline stages (checkboxes) =====
     do_motioncor: bool = True

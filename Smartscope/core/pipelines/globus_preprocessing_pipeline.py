@@ -216,12 +216,24 @@ class GlobusPreprocessingPipeline(PreprocessingPipeline):
         return str(hm.pk)
 
     def _group_is_complete(self, group_key: str, group_items: List) -> bool:
-        """Check if all items in a group have been acquired (ready to submit)."""
+        """Check if all items in a group have been acquired (ready to submit).
+
+        For grouped modes, we require a settle period: the newest image in the
+        group must be older than ``group_settle_seconds`` so that we don't
+        submit a partial BIS group while the microscope is still acquiring.
+        """
         if self.cmd_data.grouping == 'per_micrograph':
             return True  # always ready
-        # For per_group and per_square, check if all expected items are acquired
-        # TODO: Compare against expected count from parent model
-        return all(hm.status == 'acquired' for hm in group_items)
+        if not all(hm.status == 'acquired' for hm in group_items):
+            return False
+        # Require that the group has been stable (no new images) for N seconds
+        from django.utils import timezone
+        settle = getattr(self.cmd_data, 'group_settle_seconds', 60)
+        newest = max(hm.completion_time for hm in group_items)
+        age = (timezone.now() - newest).total_seconds()
+        if age < settle:
+            return False
+        return True
 
     def _build_groups(self) -> Dict[str, List]:
         """Group incomplete processes by grouping key."""
@@ -607,6 +619,7 @@ class GlobusPreprocessingPipeline(PreprocessingPipeline):
         if task['status'] == 'SUCCEEDED':
             logger.info(f'Transfer {task_id} completed for group {info["group_key"]}')
             del self._active_flow_runs[task_id]
+            self._submitted_groups.discard(info["group_key"])
         elif task['status'] == 'FAILED':
             logger.error(f'Transfer {task_id} failed: {task.get("nice_status_details", "")}')
             del self._active_flow_runs[task_id]
@@ -632,6 +645,8 @@ class GlobusPreprocessingPipeline(PreprocessingPipeline):
             else:
                 logger.warning(f'Flow completed but .done.json not found at {done_path}')
             del self._active_flow_runs[run_id]
+            # Allow resubmission if new images arrived in this group while the flow ran
+            self._submitted_groups.discard(info["group_key"])
 
         elif status in ("FAILED", "CANCELLED"):
             logger.error(f'Flow run {run_id} {status} for group {info["group_key"]}')

@@ -1,58 +1,51 @@
 #!/usr/bin/env python3
-"""Register the Doppio Globus Compute function using existing tokens.
+"""Standalone runner for SmartScope Doppio live preprocessing.
+
+Called by the Globus Compute wrapper function. Contains all the logic
+that was previously serialized into the registered function.
 
 Usage:
-    docker exec smartscope-smartscope-1 python /opt/smartscope/scripts/register_doppio_function.py
+    python3 run_doppio_live.py <manifest_path> <project_dir> \
+        <source_collection> <destination_collection> \
+        <source_base_path> <destination_base_path> \
+        <destination_filesystem_root>
+
+Prints JSON result to stdout.
 """
 
 import json
+import os
+import subprocess
+import sys
+import time
 from pathlib import Path
-from globus_sdk import NativeAppAuthClient, ComputeClientV2, RefreshTokenAuthorizer
-from globus_compute_sdk.sdk.client import FunctionRegistrationData
 
 
-def run_doppio_live(manifest_path: str, project_dir: str,
-                    source_collection: str = "", destination_collection: str = "",
-                    source_base_path: str = "", destination_base_path: str = "",
-                    destination_filesystem_root: str = "") -> dict:
-    """Run preprocessing for a batch of movies via SLURM.
+def main():
+    (manifest_path, project_dir, source_collection, destination_collection,
+     source_base_path, destination_base_path, destination_filesystem_root) = sys.argv[1:]
 
-    Called by Globus Compute on the HPC. Writes a SLURM batch script
-    that runs the staged pipeline (motioncor -> CTF -> picking ->
-    extraction -> finalize), submits it, waits for completion, reads
-    results from the STAR file, and returns transfer items.
-    """
-    import json as _json
-    import os
-    import subprocess
-    import time
-    from pathlib import Path as _Path
-
-    manifest = _json.loads(_Path(manifest_path).read_text())
+    manifest = json.loads(Path(manifest_path).read_text())
     batch_id = manifest.get('batch_id', 'unknown')
     config = manifest.get('config', {})
 
-    # Filter to only movie files (not .mdoc etc)
     movies = [m for m in manifest.get('movies', [])
               if m.lower().endswith(('.tif', '.tiff', '.mrc', '.eer'))]
 
     if not movies:
-        return {'status': 'completed', 'batch_id': batch_id,
-                'results': [], 'transfer_items': []}
+        print(json.dumps({'status': 'completed', 'batch_id': batch_id,
+                          'results': [], 'transfer_items': []}))
+        return
 
-    # --- Set up job directory ---
-    job_dir = _Path(config.get('output_dir',
-                    str(_Path(project_dir) / 'LivePreprocess' / 'job001')))
+    job_dir = Path(config.get('output_dir',
+                   str(Path(project_dir) / 'LivePreprocess' / 'job001')))
     for subdir in ['MotionCorr/Micrographs', 'MotionCorr/Motion',
                    'CtfFind/Micrographs', 'MiFFI', 'AutoPick/Micrographs',
-                   'Thumbnails', 'CtfThumbnails', 'batches',
-                   'Extract/Particles']:
+                   'Thumbnails', 'CtfThumbnails', 'batches', 'Extract/Particles']:
         (job_dir / subdir).mkdir(parents=True, exist_ok=True)
 
-    # Write config
     config_data = {
-        'output_dir': str(job_dir),
-        'project_dir': project_dir,
+        'output_dir': str(job_dir), 'project_dir': project_dir,
         'pixel_size': config.get('pixel_size', 1.0),
         'voltage': config.get('voltage', 300),
         'cs': config.get('cs', 2.7),
@@ -74,16 +67,14 @@ def run_doppio_live(manifest_path: str, project_dir: str,
         'do_extract': config.get('do_extraction', False),
         'extract_box_size': config.get('extract_box_size', 256),
         'extract_downscale': config.get('extract_downscale', 1),
-        'thumbnail_size': config.get('thumbnail_size', 1024),
+        'thumbnail_size': config.get('thumbnail_size', 512),
     }
-    config_path = job_dir / 'batches' / f'{batch_id}_config.json'
-    config_path.write_text(_json.dumps(config_data, indent=2))
+    config_path = job_dir / 'live_config.json'
+    config_path.write_text(json.dumps(config_data, indent=2))
 
-    # Write movies file
     movies_file = job_dir / 'batches' / f'{batch_id}_movies.txt'
     movies_file.write_text('\n'.join(movies) + '\n')
 
-    # --- Build staged SLURM script ---
     batches_dir = job_dir / 'batches'
     mc_results = batches_dir / f'{batch_id}_mc.json'
     ctf_results = batches_dir / f'{batch_id}_ctf.json'
@@ -99,14 +90,10 @@ def run_doppio_live(manifest_path: str, project_dir: str,
     worker_time = config.get('worker_time_limit', '24:00:00')
     worker_mem = config.get('worker_mem', '32G')
 
-    stages = []
-
-    # Motion correction
-    stages.append(('motioncor', motioncor_module,
+    stages = [('motioncor', motioncor_module,
         f'doppio-live-stage-motioncor --config {config_path} '
-        f'--movies-file {movies_file} --output-file {mc_results}'))
+        f'--movies-file {movies_file} --output-file {mc_results}')]
 
-    # CTF
     ctf_backend = config.get('ctf_backend', 'ctffind5')
     if ctf_backend == 'motioncor3':
         stages.append(('ctf', None, f'cp {mc_results} {ctf_results}'))
@@ -115,16 +102,13 @@ def run_doppio_live(manifest_path: str, project_dir: str,
             f'doppio-live-stage-ctf --config {config_path} '
             f'--input-file {mc_results} --output-file {ctf_results}'))
 
-    # Picking
-    picking_input = ctf_results
     if config.get('do_picking', True):
         stages.append(('picking', picking_module,
             f'doppio-live-stage-picking --config {config_path} '
-            f'--input-file {picking_input} --output-file {pick_results}'))
+            f'--input-file {ctf_results} --output-file {pick_results}'))
     else:
-        stages.append(('picking', None, f'cp {picking_input} {pick_results}'))
+        stages.append(('picking', None, f'cp {ctf_results} {pick_results}'))
 
-    # Extraction
     if config.get('do_extraction', False) and config.get('do_picking', True):
         stages.append(('extraction', None,
             f'doppio-live-stage-extraction --config {config_path} '
@@ -132,12 +116,10 @@ def run_doppio_live(manifest_path: str, project_dir: str,
     else:
         stages.append(('extraction', None, f'cp {pick_results} {extract_results}'))
 
-    # Finalize
     stages.append(('finalize', None,
         f'doppio-live-stage-finalize --config {config_path} '
         f'--input-file {extract_results}'))
 
-    # Build script
     script_file = batches_dir / f'{batch_id}.sh'
     combined_log = batches_dir / f'{batch_id}.log'
 
@@ -154,7 +136,7 @@ def run_doppio_live(manifest_path: str, project_dir: str,
     ]
     if worker_account:
         lines.append(f'#SBATCH --account={worker_account}')
-    lines.append(f'#SBATCH --constraint="a40|a100"')
+    lines.append('#SBATCH --constraint="a40|a100"')
     lines.append(f'\ncd {project_dir}')
 
     for stage_name, tool_module, command in stages:
@@ -170,84 +152,88 @@ def run_doppio_live(manifest_path: str, project_dir: str,
     script_file.write_text('\n'.join(lines) + '\n')
     script_file.chmod(0o755)
 
-    # --- Submit and wait ---
-    result = subprocess.run(
-        ['sbatch', '--parsable', str(script_file)],
-        capture_output=True, text=True, cwd=project_dir,
-    )
+    result = subprocess.run(['sbatch', '--parsable', str(script_file)],
+                            capture_output=True, text=True, cwd=project_dir)
     if result.returncode != 0:
         raise RuntimeError(f'sbatch failed: {result.stderr}')
 
     slurm_job_id = result.stdout.strip()
-
-    # Poll for SLURM job completion
-    timeout = 3600
-    poll_interval = 10
+    state = 'UNKNOWN'
     elapsed = 0
-    while elapsed < timeout:
-        time.sleep(poll_interval)
-        elapsed += poll_interval
+    while elapsed < 3600:
+        time.sleep(10)
+        elapsed += 10
         check = subprocess.run(
             ['sacct', '-j', slurm_job_id, '--format=State', '--noheader', '-P'],
-            capture_output=True, text=True,
-        )
+            capture_output=True, text=True)
         states = [s.strip() for s in check.stdout.strip().split('\n') if s.strip()]
-        if not states:
-            continue
-        state = states[0]
+        if states:
+            state = states[0]
         if state in ('COMPLETED', 'FAILED', 'CANCELLED', 'TIMEOUT', 'NODE_FAIL'):
             break
 
     if state != 'COMPLETED':
         raise RuntimeError(f'SLURM job {slurm_job_id} ended with state: {state}')
 
-    # --- Read results from finalize output ---
-    # The finalize stage writes updated results (with shape, thumbnails, etc.)
-    # back to the extract_results JSON file.
-    extract_results = batches_dir / f'{batch_id}_extract.json'
-    results = []
-    if extract_results.exists():
-        results = _json.loads(extract_results.read_text())
+    results_file = job_dir / f'.results_{batch_id}.json'
+    read_script = Path(project_dir) / f'.read_results_{batch_id}.sh'
+    read_script.write_text(
+        '#!/bin/bash\n'
+        'source /etc/profile\n'
+        'export MODULEPATH=$MODULEPATH:/home/group/superluminal/software/modulefiles\n'
+        'module load ccp/doppio\n'
+        f'python3 -c "\n'
+        f'import gemmi, json\n'
+        f'from pathlib import Path\n'
+        f'star = Path(\'{job_dir}/micrographs_ctf.star\')\n'
+        f'results = []\n'
+        f'if star.exists():\n'
+        f'    doc = gemmi.cif.read(str(star))\n'
+        f'    block = doc.find_block(\'micrographs\')\n'
+        f'    if block:\n'
+        f'        tags = block.find([\'_rlnMicrographMovieName\',\'_rlnMicrographName\',\'_rlnDefocusU\',\'_rlnDefocusV\',\'_rlnDefocusAngle\',\'_rlnCtfMaxResolution\',\'_rlnCtfFigureOfMerit\',\'_rlnAccumMotionTotal\',\'_rlnCtfIceThickness\'])\n'
+        f'        for row in tags:\n'
+        f'            stem = Path(row[1]).stem\n'
+        f'            thumb = Path(\'{job_dir}/Thumbnails/\' + stem + \'.png\')\n'
+        f'            ctf_thumb = Path(\'{job_dir}/CtfThumbnails/\' + stem + \'_Ctf.png\')\n'
+        f'            results.append(dict(movie=row[0],micrograph=row[1],defocus_u=float(row[2]) if row[2]!=\'.\'else 0.0,defocus_v=float(row[3]) if row[3]!=\'.\'else 0.0,defocus_angle=float(row[4]) if row[4]!=\'.\'else 0.0,ctf_max_resolution=float(row[5]) if row[5]!=\'.\'else 999.0,ctf_fom=float(row[6]) if row[6]!=\'.\'else 0.0,total_motion=float(row[7]) if row[7]!=\'.\'else 0.0,ice_thickness=float(row[8]) if row[8]!=\'.\'else 0.0,thumbnail=str(thumb.relative_to(Path(\'{project_dir}\'))) if thumb.exists() else \'\',ctf_thumbnail=str(ctf_thumb.relative_to(Path(\'{project_dir}\'))) if ctf_thumb.exists() else \'\'))\n'
+        f'Path(\'{results_file}\').write_text(json.dumps(results))\n'
+        f'"\n'
+    )
+    os.chmod(str(read_script), 0o755)
+    subprocess.run([str(read_script)], capture_output=True, timeout=60)
+    read_script.unlink(missing_ok=True)
 
-    # Build Globus transfer items using thumbnail_destinations from manifest
+    results = []
+    if results_file.exists():
+        results = json.loads(results_file.read_text())
+        results_file.unlink(missing_ok=True)
+
     fs_root = destination_filesystem_root.rstrip('/')
     hpc_globus_base = '/' + project_dir.replace(fs_root, '').strip('/')
-    # Thumbnail paths from finalize are relative to job_dir, not project_dir
-    job_rel = str(job_dir).replace(project_dir, '').strip('/')
-    thumb_dests = manifest.get('thumbnail_destinations', {})
 
     transfer_items = []
     for mic in results:
-        movie_name = _Path(mic.get('movie_path', mic.get('movie', ''))).name
-        dests = thumb_dests.get(movie_name, {})
-        thumb = mic.get('thumbnail', '')
-        if thumb and dests.get('png'):
-            transfer_items.append({
-                'source_path': f'{hpc_globus_base}/{job_rel}/{thumb}',
-                'destination_path': dests['png'],
-            })
-        ctf_thumb = mic.get('ctf_thumbnail', '')
-        if ctf_thumb and dests.get('ctf'):
-            transfer_items.append({
-                'source_path': f'{hpc_globus_base}/{job_rel}/{ctf_thumb}',
-                'destination_path': dests['ctf'],
-            })
+        for key in ('thumbnail', 'ctf_thumbnail'):
+            path = mic.get(key, '')
+            if path:
+                transfer_items.append({
+                    'source_path': f'{hpc_globus_base}/{path}',
+                    'destination_path': f'{source_base_path}/{path}',
+                })
 
-    # Write results to .done.json — keeps metadata out of the flow state
     done_file = job_dir / f'Manifests/{batch_id}.done.json'
     done_file.parent.mkdir(parents=True, exist_ok=True)
-    done_file.write_text(_json.dumps({
-        'status': 'completed',
-        'batch_id': batch_id,
-        'results': results,
+    done_file.write_text(json.dumps({
+        'status': 'completed', 'batch_id': batch_id, 'results': results,
     }, indent=2))
+
     done_rel = str(done_file).replace(project_dir, '').strip('/')
     transfer_items.append({
         'source_path': f'{hpc_globus_base}/{done_rel}',
         'destination_path': f'{source_base_path}/{done_rel}',
     })
 
-    # Ensure at least one transfer item (flow requires non-empty DATA)
     if not transfer_items:
         log_rel = str(combined_log).replace(project_dir, '').strip('/')
         transfer_items.append({
@@ -255,29 +241,9 @@ def run_doppio_live(manifest_path: str, project_dir: str,
             'destination_path': f'{source_base_path}/{log_rel}',
         })
 
-    return {
-        'status': 'completed',
-        'batch_id': batch_id,
-        'transfer_items': transfer_items,
-    }
+    print(json.dumps({'status': 'completed', 'batch_id': batch_id,
+                      'transfer_items': transfer_items}))
 
 
 if __name__ == '__main__':
-    TOKEN_FILE = '/opt/config/smartscope_tokens.json'
-    CLIENT_ID = '7df9d534-fb19-4d79-8e83-642f1cdcf081'
-
-    tokens = json.loads(Path(TOKEN_FILE).read_text())
-    t = tokens['funcx_service']
-    auth_client = NativeAppAuthClient(CLIENT_ID)
-    authorizer = RefreshTokenAuthorizer(
-        t['refresh_token'], auth_client,
-        access_token=t['access_token'],
-        expires_at=t['expires_at_seconds'],
-    )
-    cc = ComputeClientV2(authorizer=authorizer)
-
-    reg_data = FunctionRegistrationData(function=run_doppio_live)
-    result = cc.post('/v3/functions', data=reg_data.to_dict())
-    func_id = result.data['function_uuid']
-    print(f'Function ID: {func_id}')
-    print('Update the SmartScope form "Compute Function ID" field with this value.')
+    main()

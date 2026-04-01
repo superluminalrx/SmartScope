@@ -23,7 +23,6 @@ def _get_globus_choices():
         'destination_collection_id': [],
         'globus_flow_id': [],
         'globus_compute_endpoint_id': [],
-        'globus_compute_function_id': [],
     }
 
     try:
@@ -78,7 +77,7 @@ def _get_globus_choices():
                 flow_choices.append((flow['id'], label))
             choices['globus_flow_id'] = flow_choices
 
-        # Compute functions
+        # Compute endpoints
         if 'funcx_service' in tokens:
             try:
                 from globus_sdk import ComputeClientV2
@@ -89,22 +88,14 @@ def _get_globus_choices():
                     expires_at=t['expires_at_seconds'],
                 )
                 cc = ComputeClientV2(authorizer=authorizer)
-                func_choices = []
-                for func in cc.get('/v3/functions').data.get('functions', []):
-                    name = func.get('name', func['function_uuid'][:8])
-                    label = f"{name}  ({func['function_uuid'][:8]}…)"
-                    func_choices.append((func['function_uuid'], label))
-                choices['globus_compute_function_id'] = func_choices
-
                 endpoint_choices = []
-                for ep in cc.get('/v3/endpoints').data.get('endpoints', []):
-                    name = ep.get('name', ep['uuid'][:8])
-                    status = ep.get('status', 'unknown')
-                    label = f"{name} [{status}]  ({ep['uuid'][:8]}…)"
+                for ep in cc.get_endpoints().data:
+                    name = ep.get('display_name', ep.get('name', ep['uuid'][:8]))
+                    label = f"{name}  ({ep['uuid'][:8]}…)"
                     endpoint_choices.append((ep['uuid'], label))
                 choices['globus_compute_endpoint_id'] = endpoint_choices
             except Exception as e:
-                logger.debug(f'Could not list compute functions/endpoints: {e}')
+                logger.debug(f'Could not list compute endpoints: {e}')
 
     except Exception as e:
         logger.warning(f'Could not fetch Globus choices: {e}')
@@ -141,10 +132,10 @@ class GlobusPipelineForm(forms.Form):
         help_text='HPC endpoint where compute functions run. Leave blank for transfer-only mode.',
     )
 
-    globus_compute_function_id = forms.ChoiceField(
-        label='Compute Function',
-        choices=[],
-        help_text='The processing function to run on the HPC. Leave blank for transfer-only mode.',
+    globus_compute_function_id = forms.CharField(
+        label='Compute Function ID',
+        widget=forms.TextInput(attrs={'placeholder': 'UUID from setup_globus.py register-func'}),
+        help_text='Function UUID from registration. Leave blank for transfer-only mode.',
     )
 
     globus_flow_id = forms.ChoiceField(

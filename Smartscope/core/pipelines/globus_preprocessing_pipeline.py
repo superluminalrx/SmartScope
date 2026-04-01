@@ -870,7 +870,8 @@ class GlobusPreprocessingPipeline(PreprocessingPipeline):
         highmags_to_update = []
         holes_to_update = []
         selectors_to_create = []
-        hm_content_type = ContentType.objects.get_for_model(HighMagModel)
+        hole_content_type = ContentType.objects.get_for_model(HoleModel)
+        selector_hole_pks = set()
 
         for mic in results:
             movie_stem = Path(mic.get('movie_path', mic.get('movie', ''))).stem
@@ -913,16 +914,19 @@ class GlobusPreprocessingPipeline(PreprocessingPipeline):
             else:
                 mic['mean_pick_score'] = 0.0
 
-            # Create Selector records for each mapped result field
-            for result_key, method_name in RESULT_SELECTORS.items():
-                value = mic.get(result_key)
-                if value is not None:
-                    selectors_to_create.append(Selector(
-                        content_type=hm_content_type,
-                        object_id=hm.pk,
-                        method_name=method_name,
-                        value=float(value),
-                    ))
+            # Create Selector records on the parent hole for each mapped result field
+            if hm.hole_id:
+                hole_pk = hm.hole_id.pk
+                selector_hole_pks.add(hole_pk)
+                for result_key, method_name in RESULT_SELECTORS.items():
+                    value = mic.get(result_key)
+                    if value is not None:
+                        selectors_to_create.append(Selector(
+                            content_type=hole_content_type,
+                            object_id=hole_pk,
+                            method_name=method_name,
+                            value=float(value),
+                        ))
 
         if highmags_to_update or holes_to_update:
             with transaction.atomic():
@@ -939,16 +943,15 @@ class GlobusPreprocessingPipeline(PreprocessingPipeline):
                         fields=['status', 'completion_time']
                     )
                 if selectors_to_create:
-                    # Remove existing selectors for these highmags/methods to avoid duplicates
-                    hm_pks = [hm.pk for hm in highmags_to_update]
+                    # Remove existing selectors for these holes/methods to avoid duplicates
                     Selector.objects.filter(
-                        content_type=hm_content_type,
-                        object_id__in=hm_pks,
+                        content_type=hole_content_type,
+                        object_id__in=list(selector_hole_pks),
                         method_name__in=RESULT_SELECTORS.values(),
                     ).delete()
                     Selector.objects.bulk_create(selectors_to_create)
                     logger.info(f"Created {len(selectors_to_create)} selectors for "
-                                f"{len(highmags_to_update)} high-mag images")
+                                f"{len(selector_hole_pks)} holes")
 
             all_updated = highmags_to_update + holes_to_update
             websocket_update(all_updated, self.grid.grid_id)

@@ -453,8 +453,9 @@ class GlobusPreprocessingPipeline(PreprocessingPipeline):
             config["gain_reference"] = gain_ref
         if hasattr(self.detector, 'gain_rot') and self.detector.gain_rot is not None:
             config["gain_rotation"] = int(self.detector.gain_rot)
+        # gain_flip in DB is IMOD convention; MotionCor3 uses RELION convention (inverted)
         if hasattr(self.detector, 'gain_flip'):
-            config["gain_flip"] = int(bool(self.detector.gain_flip))
+            config["gain_flip"] = int(not self.detector.gain_flip)
         # Thumbnail size: Doppio defaults to 1024 in Y (height), no override needed.
 
         # Map movie filenames to Globus destination paths for thumbnails.

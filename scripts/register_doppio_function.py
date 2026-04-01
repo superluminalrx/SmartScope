@@ -90,7 +90,7 @@ def run_doppio_live(manifest_path: str, project_dir: str,
     pick_results = batches_dir / f'{batch_id}_pick.json'
     extract_results = batches_dir / f'{batch_id}_extract.json'
 
-    doppio_bin = '/home/group/superluminal/software/moduleapps/ccp/doppio/stable/bin'
+    doppio_bin = config.get('doppio_bin', '/home/group/superluminal/software/moduleapps/ccp/doppio/stable/bin')
     motioncor_module = config.get('motioncor_module', 'motioncor3/1.2.4')
     ctf_module = config.get('ctf_module', 'ctffind/5.0.2')
     picking_module = config.get('picking_module', 'cryolo/stable')
@@ -154,7 +154,9 @@ def run_doppio_live(manifest_path: str, project_dir: str,
     ]
     if worker_account:
         lines.append(f'#SBATCH --account={worker_account}')
-    lines.append(f'#SBATCH --constraint="a40|a100"')
+    constraint = config.get('worker_constraint', 'a40|a100')
+    if constraint:
+        lines.append(f'#SBATCH --constraint="{constraint}"')
     lines.append(f'\ncd {project_dir}')
 
     for stage_name, tool_module, command in stages:
@@ -181,6 +183,7 @@ def run_doppio_live(manifest_path: str, project_dir: str,
     slurm_job_id = result.stdout.strip()
 
     # Poll for SLURM job completion
+    state = 'UNKNOWN'
     timeout = 3600
     poll_interval = 10
     elapsed = 0

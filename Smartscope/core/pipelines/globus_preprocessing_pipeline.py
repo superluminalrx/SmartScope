@@ -559,6 +559,7 @@ class GlobusPreprocessingPipeline(PreprocessingPipeline):
             "source_collection": self.cmd_data.source_collection_id,
             "destination_collection": self.cmd_data.destination_collection_id,
             "compute_endpoint": self.cmd_data.globus_compute_endpoint_id,
+            "compute_function": self.cmd_data.globus_compute_function_id,
             "compute_kwargs": {
                 "manifest_path": manifest_path_on_hpc,
                 "project_dir": dest_fs_dir,

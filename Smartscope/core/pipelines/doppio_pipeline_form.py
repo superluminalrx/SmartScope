@@ -23,6 +23,7 @@ def _get_globus_choices():
         'destination_collection_id': [],
         'globus_flow_id': [],
         'globus_compute_endpoint_id': [],
+        'globus_compute_function_id': [],
     }
 
     try:
@@ -77,8 +78,25 @@ def _get_globus_choices():
                 flow_choices.append((flow['id'], label))
             choices['globus_flow_id'] = flow_choices
 
-        # Compute endpoints — would need globus-compute-sdk
-        # For now, leave as text input (user pastes UUID from HPC setup)
+        # Compute functions
+        if 'funcx_service' in tokens:
+            try:
+                from globus_sdk import ComputeClientV2
+                t = tokens['funcx_service']
+                authorizer = RefreshTokenAuthorizer(
+                    t['refresh_token'], auth_client,
+                    access_token=t['access_token'],
+                    expires_at=t['expires_at_seconds'],
+                )
+                cc = ComputeClientV2(authorizer=authorizer)
+                func_choices = []
+                for func in cc.get('/v3/functions').data.get('functions', []):
+                    name = func.get('name', func['function_uuid'][:8])
+                    label = f"{name}  ({func['function_uuid'][:8]}…)"
+                    func_choices.append((func['function_uuid'], label))
+                choices['globus_compute_function_id'] = func_choices
+            except Exception as e:
+                logger.debug(f'Could not list compute functions: {e}')
 
     except Exception as e:
         logger.warning(f'Could not fetch Globus choices: {e}')
@@ -113,6 +131,12 @@ class GlobusPipelineForm(forms.Form):
         label='Globus Compute Endpoint',
         widget=forms.TextInput(attrs={'placeholder': 'Run: globus-compute-endpoint list (on HPC)'}),
         help_text='UUID from "globus-compute-endpoint list" on the HPC.',
+    )
+
+    globus_compute_function_id = forms.ChoiceField(
+        label='Compute Function',
+        choices=[],
+        help_text='The processing function to run on the HPC. Register new functions with register_doppio_function.py.',
     )
 
     globus_flow_id = forms.ChoiceField(

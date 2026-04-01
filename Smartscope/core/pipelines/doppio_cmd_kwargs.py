@@ -17,6 +17,9 @@ class DoppioCmdKwargs(BaseModel):
     # Globus Compute endpoint where jobs run
     globus_compute_endpoint_id: str = ""
 
+    # Globus Compute function to invoke (registered processing function)
+    globus_compute_function_id: str = ""
+
     # Globus Flow ID (deployed flow that chains transfer -> compute -> transfer)
     globus_flow_id: str = ""
 

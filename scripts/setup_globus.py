@@ -104,6 +104,23 @@ def do_deploy_flow(tokens=None):
     fc = FlowsClient(authorizer=authorizer)
 
     definition = json.loads(FLOW_DEFINITION_FILE.read_text())
+    input_schema = {
+        "type": "object",
+        "required": ["source_collection", "destination_collection",
+                     "compute_endpoint", "compute_function",
+                     "compute_kwargs", "transfer_items", "label"],
+        "properties": {
+            "source_collection": {"type": "string"},
+            "destination_collection": {"type": "string"},
+            "compute_endpoint": {"type": "string"},
+            "compute_function": {"type": "string"},
+            "compute_kwargs": {"type": "object"},
+            "transfer_items": {"type": "array"},
+            "label": {"type": "string"},
+            "results_label": {"type": "string"},
+        },
+        "additionalProperties": False,
+    }
 
     # Check for existing SmartScope flows
     existing_flows = []
@@ -121,18 +138,18 @@ def do_deploy_flow(tokens=None):
         if choice.upper() == "N":
             title = input("Flow title [SmartScope Globus Preprocessing]: ").strip()
             title = title or "SmartScope Globus Preprocessing"
-            result = fc.create_flow(title=title, definition=definition)
+            result = fc.create_flow(title=title, definition=definition, input_schema=input_schema)
             flow_id = result["id"]
             print(f"\nNew flow deployed: {flow_id}")
         else:
             idx = int(choice) - 1
             flow_id = existing_flows[idx]["id"]
-            fc.update_flow(flow_id, definition=definition)
+            fc.update_flow(flow_id, definition=definition, input_schema=input_schema)
             print(f"\nFlow updated: {flow_id}")
     else:
         title = input("Flow title [SmartScope Globus Preprocessing]: ").strip()
         title = title or "SmartScope Globus Preprocessing"
-        result = fc.create_flow(title=title, definition=definition)
+        result = fc.create_flow(title=title, definition=definition, input_schema=input_schema)
         flow_id = result["id"]
         print(f"\nFlow deployed: {flow_id}")
 

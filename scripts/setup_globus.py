@@ -106,18 +106,25 @@ def do_deploy_flow(tokens=None):
     definition = json.loads(FLOW_DEFINITION_FILE.read_text())
     input_schema = {
         "type": "object",
-        "required": ["source_collection", "destination_collection",
-                     "compute_endpoint", "compute_function",
-                     "compute_kwargs", "transfer_items", "label"],
+        "required": ["input"],
         "properties": {
-            "source_collection": {"type": "string"},
-            "destination_collection": {"type": "string"},
-            "compute_endpoint": {"type": "string"},
-            "compute_function": {"type": "string"},
-            "compute_kwargs": {"type": "object"},
-            "transfer_items": {"type": "array"},
-            "label": {"type": "string"},
-            "results_label": {"type": "string"},
+            "input": {
+                "type": "object",
+                "required": ["source_collection", "destination_collection",
+                             "compute_endpoint", "compute_function",
+                             "compute_kwargs", "transfer_items", "label"],
+                "properties": {
+                    "source_collection": {"type": "string"},
+                    "destination_collection": {"type": "string"},
+                    "compute_endpoint": {"type": "string"},
+                    "compute_function": {"type": "string"},
+                    "compute_kwargs": {"type": "object"},
+                    "transfer_items": {"type": "array"},
+                    "label": {"type": "string"},
+                    "results_label": {"type": "string"},
+                },
+                "additionalProperties": False,
+            },
         },
         "additionalProperties": False,
     }

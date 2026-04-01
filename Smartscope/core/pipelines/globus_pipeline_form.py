@@ -95,8 +95,16 @@ def _get_globus_choices():
                     label = f"{name}  ({func['function_uuid'][:8]}…)"
                     func_choices.append((func['function_uuid'], label))
                 choices['globus_compute_function_id'] = func_choices
+
+                endpoint_choices = []
+                for ep in cc.get('/v3/endpoints').data.get('endpoints', []):
+                    name = ep.get('name', ep['uuid'][:8])
+                    status = ep.get('status', 'unknown')
+                    label = f"{name} [{status}]  ({ep['uuid'][:8]}…)"
+                    endpoint_choices.append((ep['uuid'], label))
+                choices['globus_compute_endpoint_id'] = endpoint_choices
             except Exception as e:
-                logger.debug(f'Could not list compute functions: {e}')
+                logger.debug(f'Could not list compute functions/endpoints: {e}')
 
     except Exception as e:
         logger.warning(f'Could not fetch Globus choices: {e}')
@@ -127,10 +135,10 @@ class GlobusPipelineForm(forms.Form):
 
     # ===== Globus — these become dropdowns populated from the API =====
 
-    globus_compute_endpoint_id = forms.CharField(
+    globus_compute_endpoint_id = forms.ChoiceField(
         label='Globus Compute Endpoint',
-        widget=forms.TextInput(attrs={'placeholder': 'Run: globus-compute-endpoint list (on HPC)'}),
-        help_text='UUID from "globus-compute-endpoint list" on the HPC. Leave blank for transfer-only mode.',
+        choices=[],
+        help_text='HPC endpoint where compute functions run. Leave blank for transfer-only mode.',
     )
 
     globus_compute_function_id = forms.ChoiceField(

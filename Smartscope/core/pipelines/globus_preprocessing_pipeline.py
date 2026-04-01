@@ -256,7 +256,6 @@ class GlobusPreprocessingPipeline(PreprocessingPipeline):
         self._init_globus_clients()
 
         logger.info(f'Entering main loop. Stop={self._stop.is_set()}, stop_file={self.is_stop_file()}')
-        DEBUG_SINGLE_SHOT = False
 
         while not self._stop.is_set() and not self.is_stop_file():
             self.list_incomplete_processes()
@@ -717,160 +716,20 @@ class GlobusPreprocessingPipeline(PreprocessingPipeline):
 
     # ---- Results polling & DB updates ----
 
-    def _poll_for_results(self):
-        """Check HPC for .done.json files, transfer thumbnails back, update DB."""
-        if not hasattr(self, '_polled_done_files'):
-            self._polled_done_files = set()
-
-        # List the Manifests/ dir on HPC via Globus for .done.json files
-        dest_globus_dir = (f"{self.cmd_data.destination_base_path.rstrip('/')}/"
-                           f"{self.project_path.strip('/')}")
-        manifests_globus = f"{dest_globus_dir}/LivePreprocess/job001/Manifests"
-
-        try:
-            entries = list(self.tc.operation_ls(
-                self.cmd_data.destination_collection_id,
-                path=manifests_globus,
-            ))
-        except Exception as e:
-            logger.debug(f'Could not list Manifests dir: {e}')
-            return
-
-        for entry in entries:
-            name = entry['name']
-            if not name.endswith('.done.json'):
-                continue
-            if name in self._polled_done_files:
-                continue
-
-            self._polled_done_files.add(name)
-            logger.info(f'Found completion marker: {name}')
-
-            # Transfer the .done.json back
-            self._transfer_done_file_and_update(name, manifests_globus, dest_globus_dir)
-
-    def _transfer_done_file_and_update(self, done_filename: str,
-                                        manifests_globus: str, dest_globus_dir: str):
-        """Transfer .done.json + thumbnails from HPC, then update DB."""
-        from globus_sdk import TransferData
-        import time as _time
-
-        # Transfer .done.json to local manifests dir
-        local_manifests = self.frames_dir / "manifests"
-        local_manifests.mkdir(parents=True, exist_ok=True)
-        local_done_path = local_manifests / done_filename
-
-        src_done = f"{manifests_globus}/{done_filename}"
-        dst_done = _container_to_globus_path(
-            str(local_done_path), self.cmd_data.source_base_path,
-            self.container_frames_root
-        )
-
-        td = TransferData(
-            source_endpoint=self.cmd_data.destination_collection_id,
-            destination_endpoint=self.cmd_data.source_collection_id,
-            label=f'Results {done_filename}',
-        )
-        td.add_item(src_done, dst_done)
-
-        # Also transfer thumbnails referenced in the done file
-        # We'll add them after we read the done file — for now just get the done file
-        try:
-            result = self.tc.submit_transfer(td)
-            task_id = result['task_id']
-            logger.info(f'Results transfer submitted: {task_id}')
-
-            # Wait for this small transfer to complete
-            for _ in range(30):
-                task = self.tc.get_task(task_id)
-                if task['status'] == 'SUCCEEDED':
-                    break
-                elif task['status'] in ('FAILED', 'CANCELLED'):
-                    logger.error(f'Results transfer failed: {task_id}')
-                    return
-                _time.sleep(2)
-
-        except Exception as e:
-            logger.error(f'Failed to transfer results: {e}')
-            return
-
-        # Read the .done.json and update DB
-        if not local_done_path.exists():
-            logger.warning(f'Done file not found locally after transfer: {local_done_path}')
-            return
-
-        done_data = json.loads(local_done_path.read_text())
-        if done_data.get('status') != 'completed':
-            logger.warning(f'Batch {done_data.get("batch_id")} failed: {done_data.get("error", "")}')
-            return
-
-        # Now transfer thumbnails back
-        self._transfer_thumbnails(done_data, dest_globus_dir)
-
-        # Update DB with results
-        self._update_db_from_done(done_data)
-
-    def _transfer_thumbnails(self, done_data: dict, dest_globus_dir: str):
-        """Transfer micrograph + CTF thumbnails from HPC back to DTN."""
-        from globus_sdk import TransferData
-        import time as _time
-
-        td = TransferData(
-            source_endpoint=self.cmd_data.destination_collection_id,
-            destination_endpoint=self.cmd_data.source_collection_id,
-            label=f'Thumbnails {done_data.get("batch_id", "")}',
-        )
-
-        results = done_data.get('results', [])
-        item_count = 0
-        for mic in results:
-            # Micrograph thumbnail
-            thumb = mic.get('thumbnail', '')
-            if thumb:
-                src = f"{dest_globus_dir}/{thumb.lstrip('/')}"
-                # Put thumbnail in SmartScope's pngs/ directory
-                movie_stem = Path(mic.get('movie_path', mic.get('movie', ''))).stem
-                hm_name = self._find_hm_name_for_movie(movie_stem)
-                if hm_name:
-                    dst_local = Path(self.grid.directory) / 'pngs' / f'{hm_name}.png'
-                    dst_local.parent.mkdir(parents=True, exist_ok=True)
-                    dst = _container_to_globus_path(
-                        str(dst_local), self.cmd_data.source_base_path,
-                        str(Path(self.grid.directory).parents[1])
-                    )
-                    td.add_item(src, dst)
-                    item_count += 1
-
-            # CTF thumbnail
-            ctf_thumb = mic.get('ctf_thumbnail', '')
-            if ctf_thumb:
-                src = f"{dest_globus_dir}/{ctf_thumb.lstrip('/')}"
-                if hm_name:
-                    dst_local = Path(self.grid.directory) / hm_name / 'ctf.png'
-                    dst_local.parent.mkdir(parents=True, exist_ok=True)
-                    dst = _container_to_globus_path(
-                        str(dst_local), self.cmd_data.source_base_path,
-                        str(Path(self.grid.directory).parents[1])
-                    )
-                    td.add_item(src, dst)
-                    item_count += 1
-
-        if item_count == 0:
-            logger.debug('No thumbnails to transfer')
-            return
-
-        try:
-            result = self.tc.submit_transfer(td)
-            logger.info(f'Thumbnail transfer submitted: {result["task_id"]} ({item_count} files)')
-        except Exception as e:
-            logger.error(f'Failed to submit thumbnail transfer: {e}')
-
     def _find_hm_name_for_movie(self, movie_stem: str) -> str:
         """Find the HighMagModel name that corresponds to a movie filename stem."""
-        for hm in self.incomplete_processes:
-            if hm.frames and Path(hm.frames).stem == movie_stem:
-                return hm.name
-        return ''
+        hm = (HighMagModel.parent_manager
+              .filter(grid_id=self.grid.pk, frames__endswith=f'{movie_stem}.tif')
+              .values_list('name', flat=True)
+              .first())
+        if hm:
+            return hm
+        # Try other extensions
+        hm = (HighMagModel.parent_manager
+              .filter(grid_id=self.grid.pk, frames__contains=movie_stem)
+              .values_list('name', flat=True)
+              .first())
+        return hm or ''
 
     def _update_db_from_done(self, done_data: dict):
         """Update HighMagModel + HoleModel from a .done.json file."""
@@ -975,24 +834,10 @@ class GlobusPreprocessingPipeline(PreprocessingPipeline):
                          f"{len(holes_to_update)} holes from Doppio results")
 
     def check_for_update(self, instance):
-        pass  # Handled by _poll_for_results
+        pass
 
     # ---- Shutdown ----
 
     def stop(self):
-        logger.info('Stopping Doppio preprocessing pipeline')
+        logger.info('Stopping Globus preprocessing pipeline')
         self._stop.set()
-
-
-# ---- CLI entry point for login ----
-
-if __name__ == "__main__":
-    import sys
-    if len(sys.argv) > 1 and sys.argv[1] == "login":
-        client_id = sys.argv[2] if len(sys.argv) > 2 else "7df9d534-fb19-4d79-8e83-642f1cdcf081"
-        token_file = sys.argv[3] if len(sys.argv) > 3 else "/opt/config/smartscope_tokens.json"
-        from doppio_cmd_kwargs import DoppioCmdKwargs  # noqa
-        # Inline login — see globus_login.py for the two-phase flow
-        print("Use globus_login.py for interactive login.")
-    else:
-        print("Usage: python -m Smartscope.core.pipelines.doppio_preprocessing_pipeline login")

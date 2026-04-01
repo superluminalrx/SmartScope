@@ -14,12 +14,24 @@ from Smartscope.core.models.grid import AutoloaderGrid
 from Smartscope.core.models.high_mag import HighMagModel
 from Smartscope.core.models.hole import HoleModel
 from Smartscope.core.models.models_actions import update_fields
+from Smartscope.core.models import Selector
 
 from .preprocessing_pipeline import PreprocessingPipeline
 from .doppio_cmd_kwargs import DoppioCmdKwargs
 from .doppio_pipeline_form import GlobusPipelineForm
 
 logger = logging.getLogger(__name__)
+
+# Mapping from result JSON keys to Selector plugin names.
+# Each entry creates a Selector row per highmag with value from the result.
+# Plugin YAMLs in config/smartscope/plugins/ define display (colors, limits, exclude).
+RESULT_SELECTORS = {
+    'particle_count': 'Particle count',
+    'mean_pick_score': 'Pick score',
+    'ctf_max_resolution': 'CTF resolution',
+    'total_motion': 'Total motion',
+    'ice_thickness': 'Ice thickness',
+}
 
 TRANSFER_SCOPE = "urn:globus:auth:scope:transfer.api.globus.org:all"
 FLOWS_SCOPE = "https://auth.globus.org/scopes/eec9b274-0c81-4334-bdc2-54e90e689b9e/flow_user"
@@ -847,6 +859,7 @@ class GlobusPreprocessingPipeline(PreprocessingPipeline):
     def _update_db_from_done(self, done_data: dict):
         """Update HighMagModel + HoleModel from a .done.json file."""
         from django.utils import timezone
+        from django.contrib.contenttypes.models import ContentType
 
         results = done_data.get('results', [])
         pixel_size = self.cmd_data.pixel_size_override or (
@@ -856,6 +869,8 @@ class GlobusPreprocessingPipeline(PreprocessingPipeline):
 
         highmags_to_update = []
         holes_to_update = []
+        selectors_to_create = []
+        hm_content_type = ContentType.objects.get_for_model(HighMagModel)
 
         for mic in results:
             movie_stem = Path(mic.get('movie_path', mic.get('movie', ''))).stem
@@ -890,6 +905,25 @@ class GlobusPreprocessingPipeline(PreprocessingPipeline):
                 hm.hole_id.completion_time = timezone.now()
                 holes_to_update.append(hm.hole_id)
 
+            # Compute mean_pick_score from coordinates if available
+            coords = mic.get('coordinates', [])
+            if coords:
+                scores = [c[2] for c in coords if len(c) > 2]
+                mic['mean_pick_score'] = sum(scores) / len(scores) if scores else 0.0
+            else:
+                mic['mean_pick_score'] = 0.0
+
+            # Create Selector records for each mapped result field
+            for result_key, method_name in RESULT_SELECTORS.items():
+                value = mic.get(result_key)
+                if value is not None:
+                    selectors_to_create.append(Selector(
+                        content_type=hm_content_type,
+                        object_id=hm.pk,
+                        method_name=method_name,
+                        value=float(value),
+                    ))
+
         if highmags_to_update or holes_to_update:
             with transaction.atomic():
                 if highmags_to_update:
@@ -904,6 +938,17 @@ class GlobusPreprocessingPipeline(PreprocessingPipeline):
                         holes_to_update,
                         fields=['status', 'completion_time']
                     )
+                if selectors_to_create:
+                    # Remove existing selectors for these highmags/methods to avoid duplicates
+                    hm_pks = [hm.pk for hm in highmags_to_update]
+                    Selector.objects.filter(
+                        content_type=hm_content_type,
+                        object_id__in=hm_pks,
+                        method_name__in=RESULT_SELECTORS.values(),
+                    ).delete()
+                    Selector.objects.bulk_create(selectors_to_create)
+                    logger.info(f"Created {len(selectors_to_create)} selectors for "
+                                f"{len(highmags_to_update)} high-mag images")
 
             all_updated = highmags_to_update + holes_to_update
             websocket_update(all_updated, self.grid.grid_id)

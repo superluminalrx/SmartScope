@@ -45,7 +45,7 @@ class HighMagModel(Target, ExtraPropertyMixin):
     tilt_axis_angle = models.FloatField(null=True)
     tilt_angle = models.FloatField(null=True)
     ice_thickness = models.IntegerField(null=True)
-    
+
     # QueryManagers to load different relationships
     objects = HighMagImageManager()
     display = DisplayManager()

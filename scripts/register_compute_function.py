@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Register the Doppio Globus Compute function using existing tokens.
+"""Register the SmartScope Globus Compute function using existing tokens.
 
 Usage:
-    docker exec smartscope-smartscope-1 python /opt/smartscope/scripts/register_doppio_function.py
+    docker exec smartscope-smartscope-1 python /opt/smartscope/scripts/register_compute_function.py
 """
 
 import json
@@ -11,7 +11,7 @@ from globus_sdk import NativeAppAuthClient, ComputeClientV2, RefreshTokenAuthori
 from globus_compute_sdk.sdk.client import FunctionRegistrationData
 
 
-def run_doppio_live(manifest_path: str, project_dir: str,
+def run_preprocessing(manifest_path: str, project_dir: str,
                     source_collection: str = "", destination_collection: str = "",
                     source_base_path: str = "", destination_base_path: str = "",
                     destination_filesystem_root: str = "") -> dict:
@@ -279,7 +279,7 @@ if __name__ == '__main__':
     )
     cc = ComputeClientV2(authorizer=authorizer)
 
-    reg_data = FunctionRegistrationData(function=run_doppio_live)
+    reg_data = FunctionRegistrationData(function=run_preprocessing)
     result = cc.post('/v3/functions', data=reg_data.to_dict())
     func_id = result.data['function_uuid']
     print(f'Function ID: {func_id}')

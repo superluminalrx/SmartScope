@@ -136,7 +136,7 @@ class GlobusPipelineForm(forms.Form):
     globus_compute_function_id = forms.ChoiceField(
         label='Compute Function',
         choices=[],
-        help_text='The processing function to run on the HPC. Register new functions with register_doppio_function.py.',
+        help_text='The processing function to run on the HPC. Register new functions with setup_globus.py.',
     )
 
     globus_flow_id = forms.ChoiceField(
@@ -165,7 +165,7 @@ class GlobusPipelineForm(forms.Form):
 
     destination_base_path = forms.CharField(
         label='Destination Base Path (Globus)',
-        help_text='Globus collection path for Doppio projects, e.g. "/CryoEM/Projects".',
+        help_text='Globus collection path for HPC projects, e.g. "/CryoEM/Projects".',
     )
 
     destination_filesystem_root = forms.CharField(
@@ -177,7 +177,7 @@ class GlobusPipelineForm(forms.Form):
 
     slot_1 = forms.CharField(
         label='Slot 1',
-        help_text='Doppio project path. e.g. "Lodos/Apoferritin". Same value = same project. Empty = skip.',
+        help_text='HPC project path. e.g. "Lodos/Apoferritin". Same value = same project. Empty = skip.',
     )
     slot_2 = forms.CharField(label='Slot 2')
     slot_3 = forms.CharField(label='Slot 3')

@@ -17,8 +17,8 @@ from Smartscope.core.models.models_actions import update_fields
 from Smartscope.core.models import Selector
 
 from .preprocessing_pipeline import PreprocessingPipeline
-from .doppio_cmd_kwargs import DoppioCmdKwargs
-from .doppio_pipeline_form import GlobusPipelineForm
+from .globus_pipeline_config import GlobusPipelineConfig
+from .globus_pipeline_form import GlobusPipelineForm
 
 logger = logging.getLogger(__name__)
 
@@ -57,7 +57,7 @@ def _save_tokens(token_file: str, tokens: dict):
     path.chmod(0o600)
 
 
-def _build_transfer_client(cmd_data: DoppioCmdKwargs):
+def _build_transfer_client(cmd_data: GlobusPipelineConfig):
     from globus_sdk import NativeAppAuthClient, TransferClient, RefreshTokenAuthorizer
 
     tokens = _load_tokens(cmd_data.token_file)
@@ -77,7 +77,7 @@ def _build_transfer_client(cmd_data: DoppioCmdKwargs):
     return TransferClient(authorizer=authorizer)
 
 
-def _build_flows_client(cmd_data: DoppioCmdKwargs):
+def _build_flows_client(cmd_data: GlobusPipelineConfig):
     """Build a Globus Flows client (SpecificFlowClient) for running flows."""
     from globus_sdk import NativeAppAuthClient, SpecificFlowClient, RefreshTokenAuthorizer
 
@@ -135,7 +135,7 @@ class GlobusPreprocessingPipeline(PreprocessingPipeline):
     name = 'globusPipeline'
     description = 'Globus Transfer & Globus Compute via Globus Flows. Users can write and register their own flows to perform any combination of transfer, compute, and return.'
 
-    cmdkwargs_handler = DoppioCmdKwargs
+    cmdkwargs_handler = GlobusPipelineConfig
     pipeline_form = GlobusPipelineForm
 
     incomplete_processes: List = []
@@ -147,7 +147,7 @@ class GlobusPreprocessingPipeline(PreprocessingPipeline):
         self.detector = self.grid.session_id.detector_id
         self.cmd_data = self.cmdkwargs_handler.parse_obj(cmd_data)
 
-        # Resolve this grid's Doppio project from slot mapping
+        # Resolve this grid's remote project from slot mapping
         self.grid_position = getattr(self.grid, 'position', None)
         self.project_path = ""
         if self.grid_position:
@@ -248,7 +248,7 @@ class GlobusPreprocessingPipeline(PreprocessingPipeline):
     def start(self):
         if not self.project_path:
             logger.info(f'Grid {self.grid.grid_id} (slot {self.grid_position}): '
-                        f'no Doppio project assigned, skipping.')
+                        f'no remote project assigned, skipping.')
             return
 
         logger.info(f'Starting Globus pipeline: grouping={self.cmd_data.grouping}, '
@@ -399,16 +399,16 @@ class GlobusPreprocessingPipeline(PreprocessingPipeline):
 
     def _build_manifest(self, group_key: str, batch: List, file_pairs: List,
                          flow_run_id: str = "", gain_ref: str = "") -> dict:
-        """Build a Doppio-side manifest for this batch.
+        """Build a HPC-side manifest for this batch.
 
-        The manifest tells Doppio's orchestrator (in SmartScope mode):
-        - What movies were transferred (relative to Doppio project dir)
+        The manifest tells the HPC compute function:
+        - What movies were transferred (relative to remote project dir)
         - The flow_run_id to callback when processing is done
         - Any metadata overrides (pixel size, voltage, etc.)
         """
         batch_id = self._flow_label(group_key, batch)
 
-        # Movie paths relative to Doppio project dir
+        # Movie paths relative to remote project dir
         # (SmartScopeMode resolves them to absolute via project_dir)
         dest_globus_base = (f"{self.cmd_data.destination_base_path.rstrip('/')}/"
                             f"{self.project_path.strip('/')}")
@@ -421,7 +421,7 @@ class GlobusPreprocessingPipeline(PreprocessingPipeline):
                 rel = rel[len(dest_globus_base):].lstrip('/')
             movies.append(rel)
 
-        # Build config dict matching doppio-live-worker's PipelineConfig
+        # Build config dict matching the compute function's expected config
         fs_root = self.cmd_data.destination_filesystem_root.rstrip('/')
         dest_globus = (f"{self.cmd_data.destination_base_path.rstrip('/')}/"
                        f"{self.project_path.strip('/')}")
@@ -467,7 +467,7 @@ class GlobusPreprocessingPipeline(PreprocessingPipeline):
         # gain_flip in DB is IMOD convention; MotionCor3 uses RELION convention (inverted)
         if hasattr(self.detector, 'gain_flip'):
             config["gain_flip"] = int(not self.detector.gain_flip)
-        # Thumbnail size: Doppio defaults to 1024 in Y (height), no override needed.
+        # Thumbnail size: Default thumbnail size is 1024 in Y (height), no override needed.
 
         # Map movie filenames to Globus destination paths for thumbnails.
         # The compute function uses this to put thumbnails directly where SmartScope expects them.
@@ -494,7 +494,7 @@ class GlobusPreprocessingPipeline(PreprocessingPipeline):
         }
 
     def _transfer_manifest(self, manifest: dict):
-        """Transfer the manifest JSON to the Doppio project's Manifests/ dir on HPC."""
+        """Transfer the manifest JSON to the remote project's Manifests/ dir on HPC."""
         from globus_sdk import TransferData
 
         batch_id = manifest["batch_id"]
@@ -582,7 +582,7 @@ class GlobusPreprocessingPipeline(PreprocessingPipeline):
     def _start_transfer_only(self, group_key: str, batch: List, file_pairs: List, label: str = "", gain_ref: str = ""):
         """Transfer-only mode: just move files to HPC.
 
-        Also writes a manifest so Doppio can pick them up later
+        Also writes a manifest for HPC processing
         if the user starts a Live job manually.
         """
         from globus_sdk import TransferData
@@ -832,7 +832,7 @@ class GlobusPreprocessingPipeline(PreprocessingPipeline):
             all_updated = highmags_to_update + holes_to_update
             websocket_update(all_updated, self.grid.grid_id)
             logger.info(f"Updated {len(highmags_to_update)} high-mag images, "
-                         f"{len(holes_to_update)} holes from Doppio results")
+                         f"{len(holes_to_update)} holes from preprocessing results")
 
     def check_for_update(self, instance):
         pass

@@ -6,7 +6,7 @@ import logging
 logger = logging.getLogger(__name__)
 
 
-class DoppioCmdKwargs(BaseModel):
+class GlobusPipelineConfig(BaseModel):
 
     # How to group images into flow runs
     #   per_micrograph: one flow per high-mag image (immediate)
@@ -74,5 +74,5 @@ class DoppioCmdKwargs(BaseModel):
     token_file: str = "/opt/config/smartscope_tokens.json"
 
     def get_project_for_slot(self, position: int) -> str:
-        """Return the Doppio project path for a given autoloader slot (1-12)."""
+        """Return the HPC project path for a given autoloader slot (1-12)."""
         return getattr(self, f"slot_{position}", "")

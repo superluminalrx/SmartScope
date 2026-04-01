@@ -17,7 +17,6 @@ PREPROCESSING_PIPELINE_FACTORY = {
     # "cryoSPARC" : CryoSPARCPipeline,
     "nextpypPipeline" : NextPYPPreprocessingPipeline,
     "globusPipeline" : GlobusPreprocessingPipeline,
-    "doppioPipeline" : GlobusPreprocessingPipeline,  # backwards compat
 }
 
 def load_preprocessing_pipeline(file:Path):

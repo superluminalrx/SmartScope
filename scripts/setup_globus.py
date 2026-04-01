@@ -6,11 +6,15 @@ flow, and register the compute function. Run inside the SmartScope
 container or anywhere with globus-sdk installed.
 
 Usage:
-    python setup_globus.py                # Interactive: auth + deploy + register
-    python setup_globus.py auth           # Just authenticate
-    python setup_globus.py deploy-flow    # Just deploy/update the flow
-    python setup_globus.py register-func  # Just register the compute function
-    python setup_globus.py status         # Show current config
+    python setup_globus.py                              # Interactive: auth + deploy + register
+    python setup_globus.py auth                         # Just authenticate
+    python setup_globus.py deploy-flow                  # Just deploy/update the flow
+    python setup_globus.py register-func                # Register the default compute function
+    python setup_globus.py register-func -f my_func.py  # Register a custom compute function
+    python setup_globus.py status                       # Show current config
+
+To write a custom compute function, copy scripts/compute_function_template.py
+and implement the run_preprocessing() function for your HPC environment.
 """
 
 import json
@@ -163,9 +167,10 @@ def _reauth_for_flow(flow_id, tokens):
 
 # ---------- Register Compute Function ----------
 
-def do_register_function(tokens=None):
+def do_register_function(tokens=None, function_file=None):
     from globus_sdk import NativeAppAuthClient, ComputeClientV2, RefreshTokenAuthorizer
     from globus_compute_sdk.sdk.client import FunctionRegistrationData
+    import importlib.util
 
     print("\n=== Register Compute Function ===\n")
 
@@ -185,16 +190,28 @@ def do_register_function(tokens=None):
     )
     cc = ComputeClientV2(authorizer=authorizer)
 
-    # Import the canonical compute function
-    sys.path.insert(0, str(Path(__file__).resolve().parent))
-    from register_compute_function import run_preprocessing
+    # Load the compute function from file
+    if function_file is None:
+        function_file = str(Path(__file__).resolve().parent / "register_compute_function.py")
+        print(f"Using default function: {function_file}")
+    else:
+        print(f"Using custom function: {function_file}")
 
-    reg_data = FunctionRegistrationData(function=run_preprocessing)
+    spec = importlib.util.spec_from_file_location("compute_func", function_file)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+
+    if not hasattr(mod, "run_preprocessing"):
+        print(f"Error: {function_file} must define a 'run_preprocessing' function.")
+        return None
+
+    func = mod.run_preprocessing
+    reg_data = FunctionRegistrationData(function=func)
     result = cc.post("/v3/functions", data=reg_data.to_dict())
     func_id = result.data["function_uuid"]
 
     print(f"Function registered: {func_id}")
-    print(f"Function name: run_preprocessing")
+    print(f"Source: {function_file}")
 
     return func_id
 
@@ -253,18 +270,38 @@ def do_full_setup():
 # ---------- CLI ----------
 
 if __name__ == "__main__":
-    cmd = sys.argv[1] if len(sys.argv) > 1 else "setup"
+    import argparse
 
-    commands = {
-        "setup": do_full_setup,
-        "auth": do_auth,
-        "deploy-flow": do_deploy_flow,
-        "register-func": do_register_function,
-        "status": do_status,
-    }
+    parser = argparse.ArgumentParser(
+        description="SmartScope Globus Pipeline Setup",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=__doc__,
+    )
+    sub = parser.add_subparsers(dest="command")
+    sub.default = "setup"
 
-    if cmd in ("-h", "--help") or cmd not in commands:
-        print(__doc__)
-        sys.exit(0 if cmd in ("-h", "--help") else 1)
+    sub.add_parser("setup", help="Full interactive setup (auth + deploy + register)")
+    sub.add_parser("auth", help="Authenticate with Globus")
+    sub.add_parser("deploy-flow", help="Deploy or update the Globus Flow")
 
-    commands[cmd]()
+    reg = sub.add_parser("register-func", help="Register a compute function")
+    reg.add_argument("--function", "-f", metavar="FILE",
+                     help="Path to a Python file containing run_preprocessing(). "
+                          "Default: the bundled SLURM-based function. "
+                          "Copy scripts/compute_function_template.py to get started.")
+
+    sub.add_parser("status", help="Show current configuration")
+
+    args = parser.parse_args()
+    cmd = args.command or "setup"
+
+    if cmd == "setup":
+        do_full_setup()
+    elif cmd == "auth":
+        do_auth()
+    elif cmd == "deploy-flow":
+        do_deploy_flow()
+    elif cmd == "register-func":
+        do_register_function(function_file=getattr(args, "function", None))
+    elif cmd == "status":
+        do_status()

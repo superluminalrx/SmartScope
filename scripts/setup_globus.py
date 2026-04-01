@@ -128,6 +128,22 @@ def do_deploy_flow(tokens=None):
         if "SmartScope" in flow.get("title", ""):
             existing_flows.append(flow)
 
+    def _create_new_flow():
+        title = input("Flow title [SmartScope Globus Preprocessing]: ").strip()
+        title = title or "SmartScope Globus Preprocessing"
+
+        # Get subscription ID if user has multiple
+        try:
+            result = fc.create_flow(title=title, definition=definition, input_schema=input_schema)
+        except Exception as e:
+            if "SUBSCRIPTION_MUST_BE_SPECIFIED" in str(e):
+                sub_id = input("Subscription ID (from Globus web app): ").strip()
+                result = fc.create_flow(title=title, definition=definition,
+                                        input_schema=input_schema, subscription_id=sub_id)
+            else:
+                raise
+        return result["id"]
+
     if existing_flows:
         print("Existing SmartScope flows found:")
         for i, flow in enumerate(existing_flows):
@@ -136,10 +152,7 @@ def do_deploy_flow(tokens=None):
 
         choice = input("\nUpdate existing or deploy new? ").strip()
         if choice.upper() == "N":
-            title = input("Flow title [SmartScope Globus Preprocessing]: ").strip()
-            title = title or "SmartScope Globus Preprocessing"
-            result = fc.create_flow(title=title, definition=definition, input_schema=input_schema)
-            flow_id = result["id"]
+            flow_id = _create_new_flow()
             print(f"\nNew flow deployed: {flow_id}")
         else:
             idx = int(choice) - 1
@@ -147,10 +160,7 @@ def do_deploy_flow(tokens=None):
             fc.update_flow(flow_id, definition=definition, input_schema=input_schema)
             print(f"\nFlow updated: {flow_id}")
     else:
-        title = input("Flow title [SmartScope Globus Preprocessing]: ").strip()
-        title = title or "SmartScope Globus Preprocessing"
-        result = fc.create_flow(title=title, definition=definition, input_schema=input_schema)
-        flow_id = result["id"]
+        flow_id = _create_new_flow()
         print(f"\nFlow deployed: {flow_id}")
 
     # Re-auth with flow-specific scope

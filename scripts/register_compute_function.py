@@ -101,33 +101,48 @@ def run_preprocessing(manifest_path: str, project_dir: str,
 
     doppio_module = config.get('doppio_module', 'ccp/doppio/stable')
 
-    stages = []
-
-    # Pipeliner project init (write a helper script, non-fatal)
-    init_py = None
+    # --- Ensure Pipeliner project exists (runs on login node, before SLURM) ---
     pipeline_star = _Path(project_dir) / 'default_pipeline.star'
     if not pipeline_star.exists():
-        init_py = batches_dir / f'{batch_id}_init_project.py'
-        init_py.write_text(
-            'import sys\n'
-            'from pathlib import Path\n'
-            'try:\n'
-            '    from pipeliner.project_graph import ProjectGraph\n'
-            '    from pipeliner.job_factory import get_job_types\n'
-            f'    project_dir = "{project_dir}"\n'
-            '    if Path(project_dir, "default_pipeline.star").exists():\n'
-            '        sys.exit(0)\n'
-            '    job = next((j for j in get_job_types() if j.PROCESS_NAME == "live.preprocessing"), None)\n'
-            '    if job is None:\n'
-            '        sys.exit(0)\n'
-            '    pg = ProjectGraph(pipeline_dir=project_dir, read_only=False, create_new=True)\n'
-            '    pg.add_job(job, as_status="Running", do_overwrite=False)\n'
-            '    pg.close()\n'
-            '    Path(project_dir, ".gui_projectdir").touch()\n'
-            '    print("Pipeliner project created")\n'
-            'except Exception as e:\n'
-            '    print(f"Pipeliner init skipped: {e}")\n'
-        )
+        init_lock = _Path(project_dir) / '.smartscope_init_lock'
+        try:
+            fd = os.open(str(init_lock), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            os.close(fd)
+        except (FileExistsError, OSError):
+            pass  # Another call is handling it, or can't create lock
+        else:
+            init_py = batches_dir / f'{batch_id}_init_project.py'
+            init_py.write_text(
+                'import sys\n'
+                'from pathlib import Path\n'
+                'try:\n'
+                '    from pipeliner.project_graph import ProjectGraph\n'
+                '    from pipeliner.job_factory import get_job_types\n'
+                f'    project_dir = "{project_dir}"\n'
+                '    if Path(project_dir, "default_pipeline.star").exists():\n'
+                '        sys.exit(0)\n'
+                '    job = next((j for j in get_job_types() if j.PROCESS_NAME == "live.preprocessing"), None)\n'
+                '    if job is None:\n'
+                '        sys.exit(0)\n'
+                '    pg = ProjectGraph(pipeline_dir=project_dir, read_only=False, create_new=True)\n'
+                '    pg.add_job(job, as_status="Running", do_overwrite=False)\n'
+                '    pg.close()\n'
+                '    Path(project_dir, ".gui_projectdir").touch()\n'
+                '    print("Pipeliner project created")\n'
+                'except Exception as e:\n'
+                '    print(f"Pipeliner init skipped: {e}")\n'
+            )
+            try:
+                subprocess.run(
+                    ['bash', '-c',
+                     f'source /etc/profile.d/modules.sh && module load {doppio_module} && '
+                     f'python3 {init_py}'],
+                    capture_output=True, text=True, timeout=120,
+                )
+            except Exception:
+                pass  # Non-fatal
+
+    stages = []
 
     # Motion correction
     stages.append(('motioncor', motioncor_module,
@@ -186,15 +201,6 @@ def run_preprocessing(manifest_path: str, project_dir: str,
     if constraint:
         lines.append(f'#SBATCH --constraint="{constraint}"')
     lines.append(f'\ncd {project_dir}')
-
-    # Init Pipeliner project if it doesn't exist (non-fatal, flock to prevent races)
-    if init_py:
-        lock_file = _Path(project_dir) / '.smartscope_init.lock'
-        lines.append(f'\n# === Init Pipeliner project ===')
-        lines.append('source /etc/profile.d/modules.sh')
-        lines.append('module purge')
-        lines.append(f'module load {doppio_module}')
-        lines.append(f'flock -n "{lock_file}" python3 {init_py} || true')
 
     for stage_name, tool_module, command in stages:
         stage_log = batches_dir / f'{batch_id}_{stage_name}.log'

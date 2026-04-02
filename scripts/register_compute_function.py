@@ -103,23 +103,33 @@ def run_preprocessing(manifest_path: str, project_dir: str,
 
     stages = []
 
-    # Pipeliner project init (only runs if default_pipeline.star doesn't exist)
-    init_script = (
-        f'if [ ! -f "{project_dir}/default_pipeline.star" ]; then '
-        f'python3 -c "'
-        f'from pipeliner.project_graph import ProjectGraph; '
-        f'from pipeliner.job_factory import get_job_types; '
-        f'job_cls = next((c for c in get_job_types() if c.PROCESS_NAME == \\\"live.preprocessing\\\"), None); '
-        f'pg = ProjectGraph(pipeline_dir=\\\"{project_dir}\\\", read_only=False, create_new=True); '
-        f'job = job_cls(); '
-        f'job.joboptions[\\\"watch_directory\\\"].value = \\\"Movies/\\\"; '
-        f'job.joboptions[\\\"scan_subdirs\\\"].value = \\\"Yes\\\"; '
-        f'pg.add_job(job, as_status=\\\"Running\\\", do_overwrite=False); '
-        f'pg.close(); '
-        f'from pathlib import Path; Path(\\\"{project_dir}/.gui_projectdir\\\").touch()'
-        f'"; fi'
-    )
-    stages.append(('init_project', doppio_module, init_script))
+    # Pipeliner project init (write a helper script, non-fatal)
+    pipeline_star = _Path(project_dir) / 'default_pipeline.star'
+    if not pipeline_star.exists():
+        init_py = batches_dir / f'{batch_id}_init_project.py'
+        init_py.write_text(
+            'import sys\n'
+            'from pathlib import Path\n'
+            'try:\n'
+            '    from pipeliner.project_graph import ProjectGraph\n'
+            '    from pipeliner.job_factory import get_job_types\n'
+            f'    project_dir = "{project_dir}"\n'
+            '    if Path(project_dir, "default_pipeline.star").exists():\n'
+            '        sys.exit(0)\n'
+            '    job = next((j for j in get_job_types() if j.PROCESS_NAME == "live.preprocessing"), None)\n'
+            '    if job is None:\n'
+            '        sys.exit(0)\n'
+            '    pg = ProjectGraph(pipeline_dir=project_dir, read_only=False, create_new=True)\n'
+            '    pg.add_job(job, as_status="Running", do_overwrite=False)\n'
+            '    pg.close()\n'
+            '    Path(project_dir, ".gui_projectdir").touch()\n'
+            '    print("Pipeliner project created")\n'
+            'except Exception as e:\n'
+            '    print(f"Pipeliner init skipped: {e}")\n'
+        )
+        # Non-fatal: use || true so it doesn't kill the SLURM job
+        stages.append(('init_project', doppio_module,
+                       f'python3 {init_py} || true'))
 
     # Motion correction
     stages.append(('motioncor', motioncor_module,

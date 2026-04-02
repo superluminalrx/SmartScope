@@ -104,6 +104,7 @@ def run_preprocessing(manifest_path: str, project_dir: str,
     stages = []
 
     # Pipeliner project init (write a helper script, non-fatal)
+    init_py = None
     pipeline_star = _Path(project_dir) / 'default_pipeline.star'
     if not pipeline_star.exists():
         init_py = batches_dir / f'{batch_id}_init_project.py'
@@ -127,9 +128,6 @@ def run_preprocessing(manifest_path: str, project_dir: str,
             'except Exception as e:\n'
             '    print(f"Pipeliner init skipped: {e}")\n'
         )
-        # Non-fatal: use || true so it doesn't kill the SLURM job
-        stages.append(('init_project', doppio_module,
-                       f'python3 {init_py} || true'))
 
     # Motion correction
     stages.append(('motioncor', motioncor_module,
@@ -188,6 +186,16 @@ def run_preprocessing(manifest_path: str, project_dir: str,
     if constraint:
         lines.append(f'#SBATCH --constraint="{constraint}"')
     lines.append(f'\ncd {project_dir}')
+
+    # Init Pipeliner project if it doesn't exist (non-fatal)
+    if init_py:
+        lines.append(f'\n# === Init Pipeliner project ===')
+        lines.append('source /etc/profile.d/modules.sh')
+        lines.append('module purge')
+        lines.append(f'module load {doppio_module}')
+        lines.append(f'if [ ! -f "{project_dir}/default_pipeline.star" ]; then')
+        lines.append(f'    python3 {init_py} || echo "Pipeliner init failed (non-fatal)"')
+        lines.append('fi')
 
     for stage_name, tool_module, command in stages:
         stage_log = batches_dir / f'{batch_id}_{stage_name}.log'

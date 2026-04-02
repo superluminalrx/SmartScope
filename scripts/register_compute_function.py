@@ -257,6 +257,20 @@ def run_preprocessing(manifest_path: str, project_dir: str,
     if state != 'COMPLETED':
         raise RuntimeError(f'SLURM job {slurm_job_id} ended with state: {state}')
 
+    # --- Start dashboard API if not already running ---
+    api_port_file = job_dir / 'api_port'
+    if not api_port_file.exists():
+        try:
+            subprocess.Popen(
+                ['bash', '-c',
+                 f'source /etc/profile.d/modules.sh && module load {doppio_module} && '
+                 f'nohup doppio-live-api --output-dir {job_dir} '
+                 f'> {job_dir}/api.log 2>&1 &'],
+                start_new_session=True,
+            )
+        except Exception:
+            pass
+
     # --- Read results from finalize output ---
     # The finalize stage writes updated results (with shape, thumbnails, etc.)
     # back to the extract_results JSON file.

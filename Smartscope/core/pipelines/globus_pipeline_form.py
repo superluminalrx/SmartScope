@@ -232,21 +232,20 @@ class GlobusPipelineForm(forms.Form):
 
         # Load parameter templates from /opt/config/globus_templates/
         templates_dir = Path('/opt/config/globus_templates')
+        self._template_contents = {}
         if templates_dir.is_dir():
             template_choices = [('', '— None —')]
             for f in sorted(templates_dir.glob('*.json')):
-                template_choices.append((str(f), f.stem.replace('_', ' ')))
+                name = f.stem.replace('_', ' ')
+                template_choices.append((f.stem, name))
+                self._template_contents[f.stem] = f.read_text()
             self.fields['config_template'].choices = template_choices
-
-            # Pre-populate textarea from selected template
-            if self.is_bound:
-                template_path = self.data.get('config_template', '')
-                if template_path and Path(template_path).exists():
-                    try:
-                        self.data = self.data.copy()
-                        self.data['extra_config'] = Path(template_path).read_text()
-                    except Exception:
-                        pass
+            self.fields['config_template'].widget.attrs['data-templates'] = json.dumps(self._template_contents)
+            self.fields['config_template'].widget.attrs['onchange'] = (
+                "var t=JSON.parse(this.dataset.templates||'{}');"
+                "var v=t[this.value]||'';"
+                "document.getElementById('id_extra_config').value=v;"
+            )
 
         # Populate dynamic dropdown choices from Globus APIs
         globus_choices = _get_globus_choices()

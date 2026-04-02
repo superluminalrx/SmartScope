@@ -126,7 +126,7 @@ def run_preprocessing(manifest_path: str, project_dir: str,
                 '        sys.exit(0)\n'
                 '    with ProjectGraph(pipeline_dir=project_dir, read_only=False, create_new=True) as pg:\n'
                 '        job.output_dir = f"LivePreprocess/job{pg.job_counter:03d}/"\n'
-                '        job.prepare_to_run(ignore_invalid_joboptions=True)\n'
+                '        job.create_output_nodes()\n'
                 '        pg.add_job(job, as_status="Running", do_overwrite=False)\n'
                 '    Path(project_dir, ".gui_projectdir").touch()\n'
                 '    print("Pipeliner project created")\n'

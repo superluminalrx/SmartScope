@@ -223,6 +223,14 @@ class GlobusPipelineForm(forms.Form):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
 
+        # Load defaults for extra_config from file if it exists
+        defaults_file = Path('/opt/config/globus_pipeline_defaults.json')
+        if defaults_file.exists() and not self.is_bound:
+            try:
+                self.fields['extra_config'].initial = defaults_file.read_text()
+            except Exception:
+                pass
+
         # Populate dynamic dropdown choices from Globus APIs
         globus_choices = _get_globus_choices()
         for field_name, field_choices in globus_choices.items():

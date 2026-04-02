@@ -248,6 +248,17 @@ class GlobusPipelineForm(forms.Form):
             if field_name in self.fields and field_choices:
                 self.fields[field_name].choices = [('', '— Select —')] + field_choices
 
+        # Ensure extra_config displays as formatted JSON, not Python repr
+        if self.is_bound and 'extra_config' in self.data:
+            val = self.data.get('extra_config', '')
+            if isinstance(val, dict):
+                self.data = self.data.copy()
+                self.data['extra_config'] = json.dumps(val, indent=2)
+        elif not self.is_bound and self.initial and 'extra_config' in self.initial:
+            val = self.initial['extra_config']
+            if isinstance(val, dict):
+                self.initial['extra_config'] = json.dumps(val, indent=2)
+
         for visible in self.visible_fields():
             widget = visible.field.widget
             if isinstance(widget, forms.CheckboxInput):
@@ -275,10 +286,15 @@ class GlobusPipelineForm(forms.Form):
         value = self.cleaned_data.get('extra_config', '').strip()
         if not value:
             return {}
+        # Try JSON first, fall back to Python literal (handles True/False, single quotes)
         try:
             parsed = json.loads(value)
-            if not isinstance(parsed, dict):
-                raise forms.ValidationError('Must be a JSON object (key-value pairs).')
-            return parsed
-        except json.JSONDecodeError as e:
-            raise forms.ValidationError(f'Invalid JSON: {e}')
+        except json.JSONDecodeError:
+            try:
+                import ast
+                parsed = ast.literal_eval(value)
+            except (ValueError, SyntaxError) as e:
+                raise forms.ValidationError(f'Invalid JSON or Python dict: {e}')
+        if not isinstance(parsed, dict):
+            raise forms.ValidationError('Must be a JSON object (key-value pairs).')
+        return parsed

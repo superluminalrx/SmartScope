@@ -133,14 +133,21 @@ def run_preprocessing(manifest_path: str, project_dir: str,
                 '    print(f"Pipeliner init skipped: {e}")\n'
             )
             try:
-                subprocess.run(
+                init_result = subprocess.run(
                     ['bash', '-c',
                      f'source /etc/profile.d/modules.sh && module load {doppio_module} && '
                      f'python3 {init_py}'],
                     capture_output=True, text=True, timeout=120,
                 )
-            except Exception:
-                pass  # Non-fatal
+                init_log = batches_dir / f'{batch_id}_init_project.log'
+                init_log.write_text(
+                    f'returncode: {init_result.returncode}\n'
+                    f'stdout: {init_result.stdout}\n'
+                    f'stderr: {init_result.stderr}\n'
+                )
+            except Exception as e:
+                init_log = batches_dir / f'{batch_id}_init_project.log'
+                init_log.write_text(f'Exception: {e}\n')
 
     stages = []
 

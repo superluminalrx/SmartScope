@@ -49,28 +49,6 @@ def run_preprocessing(manifest_path: str, project_dir: str,
                    'Extract/Particles', 'Manifests']:
         (job_dir / subdir).mkdir(parents=True, exist_ok=True)
 
-    # --- Ensure Pipeliner project exists ---
-    pipeline_star = _Path(project_dir) / 'default_pipeline.star'
-    if not pipeline_star.exists():
-        try:
-            from pipeliner.project_graph import ProjectGraph
-            from pipeliner.job_factory import get_job_types
-
-            job_cls = next((c for c in get_job_types()
-                           if c.PROCESS_NAME == 'live.preprocessing'), None)
-            if job_cls:
-                pg = ProjectGraph(pipeline_dir=project_dir,
-                                  read_only=False, create_new=True)
-                job = job_cls()
-                job.joboptions['watch_directory'].value = 'Movies/'
-                job.joboptions['scan_subdirs'].value = 'Yes'
-                job.joboptions['movie_pattern'].value = '*.tif'
-                pg.add_job(job, as_status='Running', do_overwrite=False)
-                pg.close()
-                _Path(project_dir, '.gui_projectdir').touch()
-        except Exception:
-            pass  # Don't fail the batch if project creation fails
-
     # Write config
     config_data = {
         'output_dir': str(job_dir),
@@ -121,7 +99,27 @@ def run_preprocessing(manifest_path: str, project_dir: str,
     worker_time = config.get('worker_time_limit', '24:00:00')
     worker_mem = config.get('worker_mem', '32G')
 
+    doppio_module = config.get('doppio_module', 'ccp/doppio/stable')
+
     stages = []
+
+    # Pipeliner project init (only runs if default_pipeline.star doesn't exist)
+    init_script = (
+        f'if [ ! -f "{project_dir}/default_pipeline.star" ]; then '
+        f'python3 -c "'
+        f'from pipeliner.project_graph import ProjectGraph; '
+        f'from pipeliner.job_factory import get_job_types; '
+        f'job_cls = next((c for c in get_job_types() if c.PROCESS_NAME == \\\"live.preprocessing\\\"), None); '
+        f'pg = ProjectGraph(pipeline_dir=\\\"{project_dir}\\\", read_only=False, create_new=True); '
+        f'job = job_cls(); '
+        f'job.joboptions[\\\"watch_directory\\\"].value = \\\"Movies/\\\"; '
+        f'job.joboptions[\\\"scan_subdirs\\\"].value = \\\"Yes\\\"; '
+        f'pg.add_job(job, as_status=\\\"Running\\\", do_overwrite=False); '
+        f'pg.close(); '
+        f'from pathlib import Path; Path(\\\"{project_dir}/.gui_projectdir\\\").touch()'
+        f'"; fi'
+    )
+    stages.append(('init_project', doppio_module, init_script))
 
     # Motion correction
     stages.append(('motioncor', motioncor_module,

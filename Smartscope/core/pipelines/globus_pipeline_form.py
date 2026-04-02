@@ -192,6 +192,13 @@ class GlobusPipelineForm(forms.Form):
 
     # ===== Extra Config (passed through to compute function) =====
 
+    config_template = forms.ChoiceField(
+        label='Parameter Template',
+        choices=[('', '— None —')],
+        required=False,
+        help_text='Load a saved parameter template. Templates are JSON files in /opt/config/globus_templates/.',
+    )
+
     extra_config = forms.CharField(
         label='Compute Function Parameters',
         widget=forms.Textarea(attrs={'rows': 10, 'placeholder':
@@ -223,13 +230,23 @@ class GlobusPipelineForm(forms.Form):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
 
-        # Load defaults for extra_config from file if it exists
-        defaults_file = Path('/opt/config/globus_pipeline_defaults.json')
-        if defaults_file.exists() and not self.is_bound:
-            try:
-                self.fields['extra_config'].initial = defaults_file.read_text()
-            except Exception:
-                pass
+        # Load parameter templates from /opt/config/globus_templates/
+        templates_dir = Path('/opt/config/globus_templates')
+        if templates_dir.is_dir():
+            template_choices = [('', '— None —')]
+            for f in sorted(templates_dir.glob('*.json')):
+                template_choices.append((str(f), f.stem.replace('_', ' ')))
+            self.fields['config_template'].choices = template_choices
+
+            # Pre-populate textarea from selected template
+            if self.is_bound:
+                template_path = self.data.get('config_template', '')
+                if template_path and Path(template_path).exists():
+                    try:
+                        self.data = self.data.copy()
+                        self.data['extra_config'] = Path(template_path).read_text()
+                    except Exception:
+                        pass
 
         # Populate dynamic dropdown choices from Globus APIs
         globus_choices = _get_globus_choices()

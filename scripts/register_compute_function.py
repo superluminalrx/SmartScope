@@ -187,15 +187,14 @@ def run_preprocessing(manifest_path: str, project_dir: str,
         lines.append(f'#SBATCH --constraint="{constraint}"')
     lines.append(f'\ncd {project_dir}')
 
-    # Init Pipeliner project if it doesn't exist (non-fatal)
+    # Init Pipeliner project if it doesn't exist (non-fatal, flock to prevent races)
     if init_py:
+        lock_file = _Path(project_dir) / '.smartscope_init.lock'
         lines.append(f'\n# === Init Pipeliner project ===')
         lines.append('source /etc/profile.d/modules.sh')
         lines.append('module purge')
         lines.append(f'module load {doppio_module}')
-        lines.append(f'if [ ! -f "{project_dir}/default_pipeline.star" ]; then')
-        lines.append(f'    python3 {init_py} || echo "Pipeliner init failed (non-fatal)"')
-        lines.append('fi')
+        lines.append(f'flock -n "{lock_file}" python3 {init_py} || true')
 
     for stage_name, tool_module, command in stages:
         stage_log = batches_dir / f'{batch_id}_{stage_name}.log'

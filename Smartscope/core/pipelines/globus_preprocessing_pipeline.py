@@ -350,6 +350,7 @@ class GlobusPreprocessingPipeline(PreprocessingPipeline):
         # Build file list from actual frame paths (include .mdoc sidecar files)
         file_pairs = []
         gain_ref_added = set()
+        pixel_size_from_mdoc = None
         for hm in batch:
             if not hm.frames:
                 logger.warning(f'No frames file for {hm.pk}, skipping')
@@ -369,39 +370,41 @@ class GlobusPreprocessingPipeline(PreprocessingPipeline):
                 mdoc_dst = dst + '.mdoc'
                 file_pairs.append((mdoc_src, mdoc_dst))
 
-                # Include the gain reference from the mdoc
-                if not gain_ref_added:
-                    try:
-                        with open(mdoc_path) as f:
-                            for line in f:
-                                if line.strip().startswith('GainReference'):
-                                    gain_name = line.split('=', 1)[1].strip()
-                                    if gain_name:
-                                        frames_dir = str(Path(container_path).parent)
-                                        gain_path = str(Path(frames_dir) / gain_name)
-                                        if Path(gain_path).exists():
-                                            gain_src = _container_to_globus_path(
-                                                gain_path, self.cmd_data.source_base_path,
-                                                self.container_frames_root)
-                                            gain_dst = (f"{self.cmd_data.destination_base_path.rstrip('/')}/"
-                                                        f"{self.project_path.strip('/')}/{gain_name}")
-                                            file_pairs.append((gain_src, gain_dst))
-                                            gain_ref_added.add(gain_name)
-                                            logger.info(f'Including gain reference: {gain_name}')
-                                    break
-                    except Exception:
-                        pass
+                # Parse mdoc for gain reference and pixel size
+                try:
+                    with open(mdoc_path) as f:
+                        for line in f:
+                            key = line.strip().split('=')[0].strip()
+                            if key == 'PixelSpacing' and not pixel_size_from_mdoc:
+                                pixel_size_from_mdoc = float(line.split('=', 1)[1].strip())
+                            if key == 'GainReference' and not gain_ref_added:
+                                gain_name = line.split('=', 1)[1].strip()
+                                if gain_name:
+                                    frames_dir = str(Path(container_path).parent)
+                                    gain_path = str(Path(frames_dir) / gain_name)
+                                    if Path(gain_path).exists():
+                                        gain_src = _container_to_globus_path(
+                                            gain_path, self.cmd_data.source_base_path,
+                                            self.container_frames_root)
+                                        gain_dst = (f"{self.cmd_data.destination_base_path.rstrip('/')}/"
+                                                    f"{self.project_path.strip('/')}/{gain_name}")
+                                        file_pairs.append((gain_src, gain_dst))
+                                        gain_ref_added.add(gain_name)
+                                        logger.info(f'Including gain reference: {gain_name}')
+                except Exception:
+                    pass
 
         # Pass gain reference name so it can be included in the manifest config
         gain_ref_name = next(iter(gain_ref_added), "")
 
         if self.fc:
-            self._start_flow_run(group_key, batch, file_pairs, label, gain_ref_name)
+            self._start_flow_run(group_key, batch, file_pairs, label, gain_ref_name, pixel_size_from_mdoc)
         else:
-            self._start_transfer_only(group_key, batch, file_pairs, label, gain_ref_name)
+            self._start_transfer_only(group_key, batch, file_pairs, label, gain_ref_name, pixel_size_from_mdoc)
 
     def _build_manifest(self, group_key: str, batch: List, file_pairs: List,
-                         flow_run_id: str = "", gain_ref: str = "") -> dict:
+                         flow_run_id: str = "", gain_ref: str = "",
+                         pixel_size: float = None) -> dict:
         """Build a HPC-side manifest for this batch.
 
         The manifest tells the HPC compute function:
@@ -437,8 +440,8 @@ class GlobusPreprocessingPipeline(PreprocessingPipeline):
         }
 
         # Microscope-derived values (SmartScope provides these automatically)
-        if hasattr(self.detector, 'pixel_size') and self.detector.pixel_size:
-            config["pixel_size"] = float(self.detector.pixel_size)
+        if pixel_size:
+            config["pixel_size"] = pixel_size
         if hasattr(self.microscope, 'voltage') and self.microscope.voltage:
             config["voltage"] = int(self.microscope.voltage)
         if hasattr(self.microscope, 'spherical_abberation') and self.microscope.spherical_abberation:
@@ -510,7 +513,7 @@ class GlobusPreprocessingPipeline(PreprocessingPipeline):
         logger.info(f'Manifest transfer submitted: {result["task_id"]} '
                      f'for batch {batch_id}')
 
-    def _start_flow_run(self, group_key: str, batch: List, file_pairs: List, label: str = "", gain_ref: str = ""):
+    def _start_flow_run(self, group_key: str, batch: List, file_pairs: List, label: str = "", gain_ref: str = "", pixel_size: float = None):
         """Start a Globus Flow run: transfer frames+manifest -> compute -> transfer back."""
         # Globus collection path (for transfers)
         dest_globus_dir = (f"{self.cmd_data.destination_base_path.rstrip('/')}/"
@@ -526,7 +529,7 @@ class GlobusPreprocessingPipeline(PreprocessingPipeline):
                                 f"Manifests/{batch_id}.json")
 
         # Build manifest and write it to the frames directory (same Globus mount)
-        manifest = self._build_manifest(group_key, batch, file_pairs, gain_ref=gain_ref)
+        manifest = self._build_manifest(group_key, batch, file_pairs, gain_ref=gain_ref, pixel_size=pixel_size)
         manifests_dir = self.frames_dir / "manifests"
         manifests_dir.mkdir(parents=True, exist_ok=True)
         local_path = manifests_dir / f"{batch_id}.json"
@@ -564,7 +567,7 @@ class GlobusPreprocessingPipeline(PreprocessingPipeline):
         self._active_flow_runs[run_id] = {"batch": batch, "group_key": group_key}
         logger.info(f'Flow run started: {run_id} for {label}')
 
-    def _start_transfer_only(self, group_key: str, batch: List, file_pairs: List, label: str = "", gain_ref: str = ""):
+    def _start_transfer_only(self, group_key: str, batch: List, file_pairs: List, label: str = "", gain_ref: str = "", pixel_size: float = None):
         """Transfer-only mode: just move files to HPC.
 
         Also writes a manifest for HPC processing
@@ -586,7 +589,7 @@ class GlobusPreprocessingPipeline(PreprocessingPipeline):
         logger.info(f'Transfer submitted: {task_id} for {label}')
 
         # Write manifest (no flow_run_id — no callback expected)
-        manifest = self._build_manifest(group_key, batch, file_pairs, gain_ref=gain_ref)
+        manifest = self._build_manifest(group_key, batch, file_pairs, gain_ref=gain_ref, pixel_size=pixel_size)
         self._transfer_manifest(manifest)
 
     # ---- Flow run status ----

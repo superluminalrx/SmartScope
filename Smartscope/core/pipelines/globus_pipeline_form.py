@@ -197,6 +197,7 @@ class GlobusPipelineForm(forms.Form):
         choices=[('', '— None —')],
         required=False,
         help_text='Load a saved parameter template. Templates are JSON files in /opt/config/globus_templates/.',
+        widget=forms.Select(attrs={'id': 'id_config_template'}),
     )
 
     extra_config = forms.CharField(
@@ -240,12 +241,6 @@ class GlobusPipelineForm(forms.Form):
                 template_choices.append((f.stem, name))
                 self._template_contents[f.stem] = f.read_text()
             self.fields['config_template'].choices = template_choices
-            self.fields['config_template'].widget.attrs['data-templates'] = json.dumps(self._template_contents)
-            self.fields['config_template'].widget.attrs['onchange'] = (
-                "var t=JSON.parse(this.dataset.templates||'{}');"
-                "var v=t[this.value]||'';"
-                "document.getElementById('id_extra_config').value=v;"
-            )
 
         # Populate dynamic dropdown choices from Globus APIs
         globus_choices = _get_globus_choices()
@@ -260,6 +255,21 @@ class GlobusPipelineForm(forms.Form):
             elif not isinstance(widget, forms.RadioSelect):
                 widget.attrs['class'] = 'form-control'
             visible.field.required = False
+
+    def template_script(self):
+        """Return a <script> tag that wires the template dropdown to the textarea."""
+        from django.utils.safestring import mark_safe
+        if not self._template_contents:
+            return ''
+        return mark_safe(
+            '<script>'
+            'var _templates=' + json.dumps(self._template_contents) + ';'
+            'document.getElementById("id_config_template").addEventListener("change",function(){'
+            'var v=_templates[this.value]||"";'
+            'document.getElementById("id_extra_config").value=v;'
+            '});'
+            '</script>'
+        )
 
     def clean_extra_config(self):
         value = self.cleaned_data.get('extra_config', '').strip()

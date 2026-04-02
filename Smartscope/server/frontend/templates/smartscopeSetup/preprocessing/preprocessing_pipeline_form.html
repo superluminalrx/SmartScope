@@ -28,3 +28,6 @@
 <script>
     $("img[id$='_help']").tooltip();
 </script>
+{% if form.template_script %}
+{{ form.template_script }}
+{% endif %}

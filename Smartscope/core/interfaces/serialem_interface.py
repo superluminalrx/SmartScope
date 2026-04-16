@@ -33,7 +33,9 @@ class SerialemInterface(MicroscopeInterface):
     logger = SerialEMLogger()
 
     def eucentricHeight(self, tilt_to:int=10, increments:int=-5, max_movement:int=200):
-        self.logger.info(f'Doing eucentric height')
+        binning = sem.ReportBinning('S')
+        self.logger.info(f'Doing eucentric height, setting Search binning to 4.')
+        sem.SetBinning('S', 4)
         offsetZ = 51
         iteration = 0
         while abs(offsetZ) > 50 and iteration != 3:
@@ -64,10 +66,15 @@ class SerialemInterface(MicroscopeInterface):
             else:
                 self.logger.info('Eucentric alignement would send the stage too far, stopping Eucentricity.')
                 break
+        sem.SetBinning('S', int(binning))
+        self.logger.info(f'Eucentric heigh done, setting Search binning back to {binning}.')
 
     def eucentricity_by_beam_tilt(self, max_movement:int=200, beam_tilt_angle:int=2):
-        self.logger.info(f'Doing eucentric height by beam tilt')
+        binning = sem.ReportBinning('V')
+        self.logger.info(f'Doing eucentric height by beam tilt, setting View binning to 4.')
+        sem.SetBinning('V', 4)
         sem.GoToLowDoseArea('V')
+
         target_Z = sem.ReportLDDefocusOffset('V')
         sem.SetEucentricFocus(1)
         sem.ChangeFocus(target_Z)
@@ -97,11 +104,18 @@ class SerialemInterface(MicroscopeInterface):
                 time.sleep(0.2)
             else:
                 self.logger.info('Eucentric alignement would send the stage too far, stopping Eucentricity.')
-                break        
+                break  
+        sem.SetBinning('V', binning)
+        self.logger.info(f'Eucentric heigh done, setting View binning back to {binning}.')      
 
     def eucentricity(self):
+        binning = sem.ReportBinning('V')
+        self.logger.info(f'Doing eucentric height, setting View binning to 4.')
+        sem.SetBinning('V', 4)
         sem.GoToLowDoseArea('V')
         sem.Eucentricity(1)
+        self.logger.info(f'Eucentric heigh done, setting View binning back to {binning}.')
+        sem.SetBinning('V', int(binning))
 
     def setup_serialem(self):
         if sem.ReportIfNavOpen() == 0:
@@ -109,8 +123,14 @@ class SerialemInterface(MicroscopeInterface):
             sem.OpenNavigator()
     
     def eucentricity_by_focus(self):
+       
+        self.logger.info(f'Doing eucentric height by beam tilt, setting View binning to 4.')
+        binning = sem.ReportBinning('V')
+        sem.SetBinning('V', 4)
         sem.GoToLowDoseArea('V')
         sem.Eucentricity(-1,-1)
+        self.logger.info(f'Eucentric heigh done, setting View binning back to {binning}.')
+        sem.SetBinning('V', int(binning))
     
     def call(self, script):
         sem.Call(script)
@@ -582,10 +602,10 @@ class SerialemInterface(MicroscopeInterface):
     def reset_image_shift(self):
         return sem.ResetImageShift()
     
-    def reset_image_shift_values(self, afis:bool=False):
+    def reset_image_shift_values(self, afis:bool=False, save_beam_tilt:bool=True):
         self.state.reset_image_shift_values()
         self.state.preAFISimageShiftX, self.state.preAFISimageShiftY = sem.ReportImageShift()[:2]
-        if afis:
+        if afis and save_beam_tilt:
             sem.SaveBeamTilt()
     
     def reset_AFIS_image_shift(self, afis:bool=False):
@@ -700,6 +720,21 @@ class SerialemInterface(MicroscopeInterface):
         sem.SetK2ReadMode('P', 1)
         sem.SetK2ReadMode('F', 1)
 
+    def check_medium_mag_size(self, hole_pitch_um:float=2.5):
+        x_size, y_size = sem.ReportCameraSetArea('V')[:2]
+        pixel_size = sem.ReportCurrentPixelSize('V')
+        x_size_um = x_size * pixel_size / 1000
+        y_size_um = y_size * pixel_size / 1000
+        return x_size_um, y_size_um
+    
+    def set_medium_mag_size_mini_montage(self, hole_pitch_um:float=2.5):
+        x_size_um, y_size_um = self.check_medium_mag_size(hole_pitch_um)
+        min_size_um = min(x_size_um, y_size_um)
+        if min_size_um > hole_pitch_um * 3:
+            self.logger.warning(f'Medium mag image size is {x_size_um:.2f} x {y_size_um:.2f} um, which may be too large for reliable for geometry calculation.')
+        num_tiles_x = math.ceil(x_size_um / 7)
+        num_tiles_y = math.ceil(y_size_um / 7)
+        self.logger.info(f'Medium mag image size is {x_size_um:.2f} x {y_size_um:.2f} um. This corresponds to {num_tiles_x} x {num_tiles_y} tiles of 7 um for hole detection.')
 
 
 

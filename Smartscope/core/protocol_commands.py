@@ -64,12 +64,16 @@ def square(scope:MicroscopeInterface,params,instance, content:Dict, *args, **kwa
 
 def squareInMediumMag(scope:MicroscopeInterface,params,instance, content:Dict, *args, **kwargs)  -> None:
     """Acquires and save the square image using the View preset."""
-    size_x, size_y = scope.get_mag_area_in_microns(magSet='V')
-    
-    total_area_size = np.sqrt(instance.area) / 10 * 1.4
-    logger.debug(f'Medium mag size in A: {size_x} x {size_y}, total area size: {total_area_size}')
-    n_tiles_x = int(np.ceil(total_area_size / size_x))
-    n_tiles_y = int(np.ceil(total_area_size / size_y))
+    if params.square_x > 1 or params.square_y > 1:
+        n_tiles_x = params.square_x
+        n_tiles_y = params.square_y
+    else:
+        size_x, size_y = scope.get_mag_area_in_microns(magSet='V')
+        area = instance.selectors.filter(method_name='Size selector').first().value
+        total_area_size = np.sqrt(area) * 1.3
+        logger.debug(f'Medium mag size in A: {size_x} x {size_y}, total area size: {total_area_size}')
+        n_tiles_x = int(np.ceil(total_area_size / size_x))
+        n_tiles_y = int(np.ceil(total_area_size / size_y))
     scope.medium_mag_montage(size=[n_tiles_x, n_tiles_y], file=instance.raw)
 
 def moveStage(scope:MicroscopeInterface,params,instance, content:Dict, *args, **kwargs)  -> None:
@@ -141,8 +145,9 @@ def alignToHoleRef(scope:MicroscopeInterface,params,instance, content:Dict, *arg
     logger.warning(f'It seems like the hole realignment did not converge after {max_iterations} iterations.')
 
 def zeroImageShift(scope:MicroscopeInterface,params,instance, content:Dict, *args, **kwargs):
+    save_beam_tilt = content.get('save_beam_tilt', True)
     scope.zero_image_shift()
-    scope.reset_image_shift_values(afis=params.afis)
+    scope.reset_image_shift_values(afis=params.afis, save_beam_tilt=save_beam_tilt)
 
 def loadHoleRef(scope:MicroscopeInterface,params,instance, content:Dict, *args, **kwargs) :
     """Loads the references/holeref.mrc image into buffer T to be used as hole template for the alignToHoleRef command."""

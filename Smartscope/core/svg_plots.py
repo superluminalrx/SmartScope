@@ -1,6 +1,7 @@
 import drawsvg as draw
 from math import floor, sqrt
 from Smartscope.core.settings.worker import PLUGINS_FACTORY
+from Smartscope.core.metadata_viewers import PREPROCESSING_METADATA_VIEWERS
 import logging
 from scipy.spatial import Delaunay
 import numpy as np
@@ -133,6 +134,11 @@ def css_color(obj, display_type, method):
         if len(labels) == 0:
             return 'blue', 'N.D.', ''
         return PLUGINS_FACTORY.get_plugin(method).get_label(labels[0])
+    # Preprocessing metadata viewers — read from Selector table
+    viewer = next((v for v in PREPROCESSING_METADATA_VIEWERS if v.name == method), None)
+    if viewer:
+        value = next((s.value for s in obj.selectors.all() if s.method_name == viewer.selector_method), None)
+        return viewer.get_label(value)
 
 def drawAtlas(atlas, targets, display_type, method) -> draw.Drawing:
     d = draw.Drawing(atlas.shape_y, atlas.shape_x, id='atlas-svg', displayInline=False, style_='height: 100%; width: 100%')

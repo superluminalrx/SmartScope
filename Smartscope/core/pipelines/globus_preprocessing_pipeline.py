@@ -37,6 +37,28 @@ TRANSFER_SCOPE = "urn:globus:auth:scope:transfer.api.globus.org:all"
 FLOWS_SCOPE = "https://auth.globus.org/scopes/eec9b274-0c81-4334-bdc2-54e90e689b9e/flow_user"
 
 
+def _move_with_retry(src: Path, dst: Path, attempts: int = 5, base_delay: float = 0.5) -> None:
+    """shutil.move with backoff for spurious CIFS ENOSPC.
+
+    Why: moving across CIFS mounts to Windows-backed shares can return
+    STATUS_DISK_FULL (-> ENOSPC) when NTFS 8.3 short-name slots collide for
+    files sharing a long-name prefix, even with terabytes of free space.
+    Retries usually succeed because the collision space is probabilistic.
+    """
+    import shutil
+    for attempt in range(attempts):
+        try:
+            shutil.move(str(src), str(dst))
+            return
+        except OSError as exc:
+            if attempt == attempts - 1:
+                raise
+            logger.warning(
+                f'move {src.name} failed ({exc.__class__.__name__}: {exc}); '
+                f'retry {attempt + 1}/{attempts - 1}'
+            )
+            time.sleep(base_delay * (2 ** attempt))
+
 
 # ---- Globus Auth Helpers ----
 
@@ -232,7 +254,10 @@ class GlobusPreprocessingPipeline(PreprocessingPipeline):
         # Require that the group has been stable (no new images) for N seconds
         from django.utils import timezone
         settle = getattr(self.cmd_data, 'group_settle_seconds', 60)
-        newest = max(hm.completion_time for hm in group_items)
+        timestamps = [hm.completion_time for hm in group_items if hm.completion_time is not None]
+        if not timestamps:
+            return True
+        newest = max(timestamps)
         age = (timezone.now() - newest).total_seconds()
         if age < settle:
             return False
@@ -420,6 +445,13 @@ class GlobusPreprocessingPipeline(PreprocessingPipeline):
                             f"{self.project_path.strip('/')}")
         movies = []
         for _, dst in file_pairs:
+            # file_pairs includes movies, .mdoc sidecars, and gain references.
+            # Only movies belong in movies[] — the rest are carried along for
+            # context but must not be processed as micrographs.
+            if dst.endswith('.mdoc'):
+                continue
+            if gain_ref and Path(dst).name == gain_ref:
+                continue
             # dst is a Globus collection path like /CryoEM/Projects/Rori/Movies/grid/frame.tif
             # Strip the project prefix to get relative path like Movies/grid/frame.tif
             rel = dst
@@ -672,7 +704,6 @@ class GlobusPreprocessingPipeline(PreprocessingPipeline):
 
     def _move_thumbnails(self, done_data: dict):
         """Move thumbnails from Globus landing path (frames mount) to SmartScope data dir."""
-        import shutil
         results = done_data.get('results', [])
         # Globus transferred to the frames mount at the same relative path as grid.directory
         # e.g. frames mount: /mnt/arctica/Superluminal/SmartScope/20260316_.../1_Rori_.../pngs/
@@ -691,14 +722,14 @@ class GlobusPreprocessingPipeline(PreprocessingPipeline):
             src = frames_grid_dir / 'pngs' / f'{hm_name}.png'
             dst = pngs_dir / f'{hm_name}.png'
             if src.exists():
-                shutil.move(str(src), str(dst))
+                _move_with_retry(src, dst)
                 count += 1
             # CTF thumbnail
             src = frames_grid_dir / hm_name / 'ctf.png'
             dst = Path(self.grid.directory) / hm_name / 'ctf.png'
             if src.exists():
                 dst.parent.mkdir(parents=True, exist_ok=True)
-                shutil.move(str(src), str(dst))
+                _move_with_retry(src, dst)
                 count += 1
         if count:
             logger.info(f'Moved {count} thumbnails to {pngs_dir}')
@@ -726,9 +757,9 @@ class GlobusPreprocessingPipeline(PreprocessingPipeline):
         from django.contrib.contenttypes.models import ContentType
 
         results = done_data.get('results', [])
-        pixel_size = self.cmd_data.extra_config.get('pixel_size', 0) or (
+        fallback_pixel_size = self.cmd_data.extra_config.get('pixel_size', 0) or (
             float(self.detector.pixel_size) if hasattr(self.detector, 'pixel_size')
-            and self.detector.pixel_size else 1.0
+            and self.detector.pixel_size else 0
         )
 
         highmags_to_update = []
@@ -760,7 +791,7 @@ class GlobusPreprocessingPipeline(PreprocessingPipeline):
             hm.ice_thickness = int(round(mic.get('ice_thickness', 0.0) / 10))
             hm.shape_x = mic.get('shape_x', 0) or 0
             hm.shape_y = mic.get('shape_y', 0) or 0
-            hm.pixel_size = pixel_size
+            hm.pixel_size = mic.get('pixel_size') or fallback_pixel_size or 1.0
             hm.status = 'completed'
             hm.completion_time = timezone.now()
             highmags_to_update.append(hm)

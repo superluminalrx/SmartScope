@@ -65,6 +65,10 @@
               "items": { "type": "number" }
             }
           },
+          "pixel_size": {
+            "type": "number",
+            "description": "Micrograph pixel size in Angstroms."
+          },
           "shape_x": {
             "type": "integer",
             "description": "Micrograph width in pixels."

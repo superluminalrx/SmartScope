@@ -242,6 +242,13 @@ class GlobusPipelineForm(forms.Form):
                 self._template_contents[f.stem] = f.read_text()
             self.fields['config_template'].choices = template_choices
 
+            # Default to doppio_live template when nothing has been selected
+            # yet and no extra_config was provided on the form.
+            if 'doppio_live' in self._template_contents and not self.is_bound:
+                if not (self.initial and self.initial.get('extra_config')):
+                    self.fields['config_template'].initial = 'doppio_live'
+                    self.initial['extra_config'] = self._template_contents['doppio_live']
+
         # Populate dynamic dropdown choices from Globus APIs
         globus_choices = _get_globus_choices()
         for field_name, field_choices in globus_choices.items():

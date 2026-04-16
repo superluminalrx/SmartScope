@@ -34,7 +34,7 @@ def plot_hist(image, size=254, **kwargs):
     ax.legend()
     ax.set_yscale('log')
     fig.canvas.draw()
-    hist = np.fromstring(fig.canvas.tostring_rgb(), dtype=np.uint8, sep='')
+    hist = np.frombuffer(fig.canvas.tostring_rgb(), dtype=np.uint8)
     hist = hist.reshape(fig.canvas.get_width_height()[::-1] + (3,))
     hist = imutils.resize(hist, height=size)
     plt.close(fig='all')

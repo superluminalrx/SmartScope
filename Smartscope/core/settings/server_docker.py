@@ -55,6 +55,14 @@ else:
     AUTOSCREENSTORAGE = None
 
 TAGS_FEATURE_FLAG = eval(os.getenv('TAGS_FEATURE_FLAG', 'False'))
+
+# Access to the web app and API from outside the network, see Smartscope/server/remote_api
+REMOTE_API_ENABLED = os.getenv('REMOTE_API_ENABLED', 'False').lower() == 'true'
+REMOTE_API_UPSTREAM = os.getenv('REMOTE_API_UPSTREAM', 'nginx:80')
+# Empty uses the public iroh relays, 'disabled' none, otherwise a comma-separated list of relay URLs.
+REMOTE_API_RELAYS = os.getenv('REMOTE_API_RELAYS', '')
+REMOTE_API_BIND = os.getenv('REMOTE_API_BIND', '')
+REMOTE_API_KEY_FILE = os.getenv('REMOTE_API_KEY_FILE', '/opt/auth/remote_api_key')
 TRAINING_ANNOTATOR_FEATURE_FLAG = eval(os.getenv('TRAINING_FEATURE_FLAG', 'False'))
 
 INSTALLED_APPS = [
@@ -76,7 +84,8 @@ INSTALLED_APPS = [
     'Smartscope.server.selector_viewer',
     'Smartscope.server.annotator',
     'Smartscope.sim_siam',
-    'Smartscope.server.management_tab'
+    'Smartscope.server.management_tab',
+    'Smartscope.server.remote_api',
 ]
 
 MIDDLEWARE = [

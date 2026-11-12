@@ -9,6 +9,7 @@ from Smartscope.core.test_commands import *
 from Smartscope.core.utils.training_data import add_to_training_set
 from Smartscope.core.export_optics import export_optics
 from .autoscreen import autoscreen, run_protocol_command
+from Smartscope.server.remote_api.listener import remote_api
 
 import numpy as np
 

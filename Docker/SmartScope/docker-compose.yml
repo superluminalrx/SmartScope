@@ -28,6 +28,13 @@ services:
     extends:
       service: smartscope
     command: ["celery", "-A", "Smartscope.tasks.app", "worker", "-n", "long@%h", "-Q", "smartscope", "--loglevel=DEBUG", "--concurrency=4"]
+  # Access from outside the network for paired devices. Idle unless REMOTE_API_ENABLED=true.
+  smartscope_remote:
+    extends:
+      service: smartscope
+    depends_on:
+      - nginx
+    command: ["smartscope.py", "remote_api"]
   smartscope_ai:
     image: ghcr.io/smartscope-org/smartscopeai:dev-cpu
     restart: always

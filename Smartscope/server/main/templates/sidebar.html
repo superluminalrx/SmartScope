@@ -55,6 +55,11 @@
                         <a class="dropdown-item" href="/admin">Admin</a>
                     </li>
                     {% endif %}
+                    {% if REMOTE_API_ENABLED %}
+                    <li>
+                        <a class="dropdown-item" href="{% url 'remoteDevices' %}">Remote devices</a>
+                    </li>
+                    {% endif %}
                 </ul>
             </div>
         </li>

@@ -62,6 +62,7 @@ dependencies = [
     "globus-sdk>=4.4.1",
     "globus-compute-sdk>=4.8.0",
     "starfile>=0.5.13",
+    "iroh>=1.2",
 ]
 
 

@@ -1,22 +1,24 @@
 """Reference client for the remote API.
 
-Pairs this machine and opens a local port that forwards to SmartScope, so any
-HTTP client can use the web app and API through it with its usual credentials:
+Opens a local port that forwards to SmartScope, so any HTTP client can use the
+web app and API through it with its usual credentials:
 
-    python -m Smartscope.server.remote_api.client pair '<pairing link>' 'My laptop'
-    python -m Smartscope.server.remote_api.client forward 48010
+    python -m Smartscope.server.remote_api.client key
+    python -m Smartscope.server.remote_api.client forward <SmartScope key or ticket> 48010
     curl -H 'Authorization: Token <your API token>' http://localhost:48010/api/
+
+`key` prints the key of this device, to be registered in the SmartScope admin site.
 """
 import asyncio
-import json
 import os
+import re
 import sys
 from pathlib import Path
 from typing import Optional
 
 import iroh
 
-from .protocol import HTTP_ALPN, PAIR_ALPN, parse_pairing_link
+from .protocol import HTTP_ALPN
 
 CHUNK = 65536
 CONFIG = Path.home() / '.smartscope_remote'
@@ -35,35 +37,26 @@ async def bind(key_file: Path, relays: bool = True):
         preset=iroh.preset_minimal(), secret_key=key, relay_mode=iroh.RelayMode.disabled()))
 
 
-def address(ticket: str):
-    return iroh.EndpointTicket.from_string(ticket).endpoint_addr()
-
-
-async def pair(endpoint, link: str, name: str) -> dict:
-    """Registers this device using a pairing link created by a staff user."""
-    ticket, code = parse_pairing_link(link)
-    connection = await endpoint.connect(address(ticket), PAIR_ALPN)
-    stream = await connection.open_bi()
-    send = stream.send()
-    await send.write_all(json.dumps({'code': code, 'name': name}).encode())
-    await send.finish()
-    reply = json.loads(await stream.recv().read_to_end(4096))
-    connection.close(0, b'')
-    return reply | {'ticket': ticket}
+def address(target: str):
+    """Address of SmartScope from its key, found through discovery, or from its ticket."""
+    target = target.strip()
+    if re.fullmatch(r'[0-9a-fA-F]{64}', target):
+        return iroh.EndpointAddr(iroh.EndpointId.from_string(target), None, [])
+    return iroh.EndpointTicket.from_string(target).endpoint_addr()
 
 
 class Forwarder:
     """Local TCP port whose connections are each carried by one stream to SmartScope."""
 
-    def __init__(self, endpoint, ticket: str):
+    def __init__(self, endpoint, target: str):
         self.endpoint = endpoint
-        self.ticket = ticket
+        self.target = target
         self.connection = None
         self.server: Optional[asyncio.AbstractServer] = None
 
     async def connect(self):
         if self.connection is None or self.connection.close_reason() is not None:
-            self.connection = await self.endpoint.connect(address(self.ticket), HTTP_ALPN)
+            self.connection = await self.endpoint.connect(address(self.target), HTTP_ALPN)
         return self.connection
 
     async def start(self, host: str = '127.0.0.1', port: int = 0) -> int:
@@ -108,16 +101,11 @@ class Forwarder:
 
 async def main(args) -> None:
     endpoint = await bind(CONFIG / 'key')
-    if args[0] == 'pair':
-        reply = await pair(endpoint, args[1], args[2] if len(args) > 2 else os.uname().nodename)
-        if reply['ok']:
-            (CONFIG / 'ticket').write_text(reply['ticket'])
-            print(f"Paired as {reply['device']}.")
-        else:
-            print(reply['error'])
+    if args[0] == 'key':
+        print(endpoint.id())
     elif args[0] == 'forward':
-        forwarder = Forwarder(endpoint, (CONFIG / 'ticket').read_text().strip())
-        port = await forwarder.start(port=int(args[1]) if len(args) > 1 else 48010)
+        forwarder = Forwarder(endpoint, args[1])
+        port = await forwarder.start(port=int(args[2]) if len(args) > 2 else 48010)
         print(f'Forwarding http://localhost:{port} to SmartScope. Stop with Ctrl-C.')
         await asyncio.Event().wait()
     await endpoint.close()

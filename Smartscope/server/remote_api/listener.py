@@ -1,6 +1,5 @@
 """The listener process: accepts paired devices over iroh and forwards their requests."""
 import asyncio
-import json
 import logging
 import os
 import time
@@ -11,12 +10,12 @@ from asgiref.sync import sync_to_async
 from django.conf import settings
 from django.http.request import split_domain_port, validate_host
 
-from . import pairing, proxy
+from . import devices, proxy
+from .protocol import HTTP_ALPN
 
 logger = logging.getLogger(__name__)
 
 HEAD_TIMEOUT = 30
-PAIR_TIMEOUT = 30
 ONLINE_TIMEOUT = 15
 RECHECK_SECONDS = 10
 PUBLISH_INTERVAL = 30
@@ -40,7 +39,7 @@ def load_secret_key(path: Path) -> bytes:
 
 def endpoint_options(secret_key: bytes, relays: str, bind_addr: str):
     import iroh
-    options = dict(secret_key=secret_key, alpns=[pairing.PAIR_ALPN, pairing.HTTP_ALPN])
+    options = dict(secret_key=secret_key, alpns=[HTTP_ALPN])
     urls = [url.strip() for url in relays.split(',') if url.strip()]
     if relays.strip().lower() == 'disabled':
         options.update(preset=iroh.preset_minimal(), relay_mode=iroh.RelayMode.disabled())
@@ -154,15 +153,15 @@ class Listener:
             except asyncio.TimeoutError:
                 logger.warning('Remote API could not reach a relay, devices outside this network may not connect.')
         while True:
-            await sync_to_async(pairing.publish_state)(str(self.endpoint.id()), self.ticket())
+            await sync_to_async(devices.publish_state)(str(self.endpoint.id()), self.ticket())
             await asyncio.sleep(PUBLISH_INTERVAL)
 
-    async def paired(self, remote: str) -> bool:
+    async def registered(self, remote: str) -> bool:
         """Looked up again every few seconds so that removing a device also ends its open connections."""
         if self.checked.get(remote, 0) > time.monotonic():
             return True
         self.checked.pop(remote, None)
-        if not await sync_to_async(pairing.authorize_device)(remote):
+        if not await sync_to_async(devices.authorize_device)(remote):
             return False
         self.checked[remote] = time.monotonic() + RECHECK_SECONDS
         return True
@@ -173,43 +172,14 @@ class Listener:
         try:
             connection = await (await incoming.accept()).connect()
             remote = str(connection.remote_id())
-            alpn = bytes(connection.alpn())
-            if alpn == pairing.PAIR_ALPN:
-                await self.handle_pairing(connection, remote)
-            elif alpn == pairing.HTTP_ALPN:
-                await self.handle_device(connection, remote)
-            else:
-                connection.close(400, b'unknown protocol')
+            await self.handle_device(connection, remote)
         except iroh.IrohError as err:
             logger.debug(f'Connection from {remote} ended: {err}')
 
-    async def handle_pairing(self, connection, remote: str) -> None:
-        try:
-            stream = await asyncio.wait_for(connection.accept_bi(), PAIR_TIMEOUT)
-            raw = await asyncio.wait_for(stream.recv().read_to_end(4096), PAIR_TIMEOUT)
-        except asyncio.TimeoutError:
-            connection.close(408, b'timeout')
-            return
-        try:
-            request = json.loads(raw)
-            code, name = request.get('code'), request.get('name')
-        except (ValueError, AttributeError):
-            code, name = None, None
-        reply = await sync_to_async(pairing.pair_device)(remote, code, name)
-        logger.info(f"Pairing of device {remote}: {'accepted as ' + reply['device'] if reply['ok'] else reply['error']}")
-        send = stream.send()
-        await send.write_all(json.dumps(reply).encode())
-        await send.finish()
-        try:
-            # Closing first could discard the reply before it is delivered.
-            await asyncio.wait_for(connection.closed(), 10)
-        except asyncio.TimeoutError:
-            connection.close(0, b'')
-
     async def handle_device(self, connection, remote: str) -> None:
-        if not await self.paired(remote):
-            logger.warning(f'Refused device {remote}, it is not paired.')
-            connection.close(403, b'device not paired')
+        if not await self.registered(remote):
+            logger.warning(f'Refused device {remote}, its key is not registered.')
+            connection.close(403, b'device not registered')
             return
         connection.set_max_concurrent_bi_streams(MAX_STREAMS)
         logger.info(f'Device {remote} connected.')
@@ -222,8 +192,8 @@ class Listener:
         recv, send = stream.recv(), stream.send()
         writer = None
         try:
-            if not await self.paired(remote):
-                connection.close(403, b'device not paired')
+            if not await self.registered(remote):
+                connection.close(403, b'device not registered')
                 return
             try:
                 head, body = await asyncio.wait_for(read_head(recv), HEAD_TIMEOUT)

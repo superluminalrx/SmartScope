@@ -7,5 +7,4 @@ def get_version():
 
 def base_settings(request):
     # return the value you want as a dictionnary. you may add multiple values in there.
-    return {'USE_MICROSCOPE': settings.USE_MICROSCOPE,
-            'REMOTE_API_ENABLED': getattr(settings, 'REMOTE_API_ENABLED', False)} | get_version()
+    return {'USE_MICROSCOPE': settings.USE_MICROSCOPE,} | get_version()

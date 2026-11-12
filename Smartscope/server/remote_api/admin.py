@@ -5,7 +5,6 @@ from .models import RemoteDevice
 
 @admin.register(RemoteDevice)
 class RemoteDeviceAdmin(admin.ModelAdmin):
-    list_display = ('name', 'user', 'short_id', 'created', 'last_seen')
-    list_filter = ('user',)
-    search_fields = ('name', 'endpoint_id', 'user__username')
-    readonly_fields = ('endpoint_id', 'created', 'last_seen')
+    list_display = ('name', 'short_id', 'paired_by', 'created', 'last_seen')
+    search_fields = ('name', 'endpoint_id')
+    readonly_fields = ('endpoint_id', 'paired_by', 'created', 'last_seen')

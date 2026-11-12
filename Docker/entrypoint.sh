@@ -75,5 +75,10 @@ if $AUTO_MIGRATION; then
   manage.py migrate
 fi
 
+# The remote API listener runs beside the web server and is restarted if it exits.
+if [[ "${REMOTE_API_ENABLED,,}" == "true" && "$1" == "gunicorn" ]]; then
+  (while true; do smartscope.py remote_api; sleep 10; done) &
+fi
+
 #Execute cmd statements
 exec "$@"

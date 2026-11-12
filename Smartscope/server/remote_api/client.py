@@ -1,11 +1,11 @@
 """Reference client for the remote API.
 
-Pairs this machine with an account and opens a local port that forwards to
-SmartScope, so any HTTP client can use the API through it:
+Pairs this machine and opens a local port that forwards to SmartScope, so any
+HTTP client can use the web app and API through it with its usual credentials:
 
     python -m Smartscope.server.remote_api.client pair '<pairing link>' 'My laptop'
     python -m Smartscope.server.remote_api.client forward 48010
-    curl http://localhost:48010/api/
+    curl -H 'Authorization: Token <your API token>' http://localhost:48010/api/
 """
 import asyncio
 import json
@@ -40,7 +40,7 @@ def address(ticket: str):
 
 
 async def pair(endpoint, link: str, name: str) -> dict:
-    """Registers this device with the account that created the pairing link."""
+    """Registers this device using a pairing link created by a staff user."""
     ticket, code = parse_pairing_link(link)
     connection = await endpoint.connect(address(ticket), PAIR_ALPN)
     stream = await connection.open_bi()
@@ -112,7 +112,7 @@ async def main(args) -> None:
         reply = await pair(endpoint, args[1], args[2] if len(args) > 2 else os.uname().nodename)
         if reply['ok']:
             (CONFIG / 'ticket').write_text(reply['ticket'])
-            print(f"Paired as {reply['device']} for user {reply['user']}.")
+            print(f"Paired as {reply['device']}.")
         else:
             print(reply['error'])
     elif args[0] == 'forward':

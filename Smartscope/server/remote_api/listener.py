@@ -3,12 +3,9 @@ import asyncio
 import json
 import logging
 import os
-import signal
-import sys
-import threading
 import time
 from pathlib import Path
-from typing import Optional, Tuple
+from typing import Tuple
 
 from asgiref.sync import sync_to_async
 from django.conf import settings
@@ -21,7 +18,7 @@ logger = logging.getLogger(__name__)
 HEAD_TIMEOUT = 30
 PAIR_TIMEOUT = 30
 ONLINE_TIMEOUT = 15
-TOKEN_SECONDS = 10
+RECHECK_SECONDS = 10
 PUBLISH_INTERVAL = 30
 MAX_STREAMS = 64
 CHUNK = 65536
@@ -109,7 +106,7 @@ class Listener:
         self.bind_addr = bind_addr
         self.endpoint = None
         self.tasks = set()
-        self.tokens = {}
+        self.checked = {}
 
     def spawn(self, coroutine) -> None:
         # The loop only keeps weak references to tasks.
@@ -160,17 +157,15 @@ class Listener:
             await sync_to_async(pairing.publish_state)(str(self.endpoint.id()), self.ticket())
             await asyncio.sleep(PUBLISH_INTERVAL)
 
-    async def token(self, remote: str) -> Optional[str]:
-        """API token of the device's owner, looked up again every few seconds so that
-        removing a device also ends its open connections."""
-        expires, token = self.tokens.get(remote, (0, None))
-        if expires > time.monotonic():
-            return token
-        self.tokens.pop(remote, None)
-        token = await sync_to_async(pairing.authorize_device)(remote)
-        if token is not None:
-            self.tokens[remote] = (time.monotonic() + TOKEN_SECONDS, token)
-        return token
+    async def paired(self, remote: str) -> bool:
+        """Looked up again every few seconds so that removing a device also ends its open connections."""
+        if self.checked.get(remote, 0) > time.monotonic():
+            return True
+        self.checked.pop(remote, None)
+        if not await sync_to_async(pairing.authorize_device)(remote):
+            return False
+        self.checked[remote] = time.monotonic() + RECHECK_SECONDS
+        return True
 
     async def handle_incoming(self, incoming) -> None:
         import iroh
@@ -201,7 +196,7 @@ class Listener:
         except (ValueError, AttributeError):
             code, name = None, None
         reply = await sync_to_async(pairing.pair_device)(remote, code, name)
-        logger.info(f"Pairing of device {remote}: {'user ' + reply['user'] if reply['ok'] else reply['error']}")
+        logger.info(f"Pairing of device {remote}: {'accepted as ' + reply['device'] if reply['ok'] else reply['error']}")
         send = stream.send()
         await send.write_all(json.dumps(reply).encode())
         await send.finish()
@@ -212,7 +207,7 @@ class Listener:
             connection.close(0, b'')
 
     async def handle_device(self, connection, remote: str) -> None:
-        if await self.token(remote) is None:
+        if not await self.paired(remote):
             logger.warning(f'Refused device {remote}, it is not paired.')
             connection.close(403, b'device not paired')
             return
@@ -227,13 +222,12 @@ class Listener:
         recv, send = stream.recv(), stream.send()
         writer = None
         try:
-            token = await self.token(remote)
-            if token is None:
+            if not await self.paired(remote):
                 connection.close(403, b'device not paired')
                 return
             try:
                 head, body = await asyncio.wait_for(read_head(recv), HEAD_TIMEOUT)
-                head, upgrade = proxy.rewrite_head(head, token, host_allowed, fallback_host())
+                head, upgrade = proxy.rewrite_head(head, host_allowed, fallback_host())
             except (proxy.BadRequest, asyncio.TimeoutError):
                 await send.write_all(proxy.BAD_REQUEST)
                 await send.finish()
@@ -268,12 +262,9 @@ class Listener:
 
 
 def remote_api() -> None:
-    """Runs the listener. Called as `smartscope.py remote_api`."""
-    # As the main process of a container, Python would otherwise ignore the stop signal.
-    signal.signal(signal.SIGTERM, lambda *args: sys.exit(0))
+    """Runs the listener. Called as `smartscope.py remote_api`, by the entrypoint of the web container."""
     if not settings.REMOTE_API_ENABLED:
         logger.info('Remote API is disabled. Set REMOTE_API_ENABLED=true to enable it.')
-        threading.Event().wait()
         return
     host, _, port = settings.REMOTE_API_UPSTREAM.rpartition(':')
     listener = Listener((host, int(port)), Path(settings.REMOTE_API_KEY_FILE),

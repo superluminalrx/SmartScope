@@ -16,8 +16,6 @@ services:
   smartscope_worker:
     extends:
       service: smartscope
-  smartscope_remote:
-    user: ${UID}:${GID}
   db:
     user: ${UID}:${GID}
   smartscope_ai:

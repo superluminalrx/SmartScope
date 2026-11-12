@@ -9,7 +9,6 @@ from django.contrib.auth import get_user_model
 from django.core.cache import cache
 from django.db import close_old_connections
 from django.utils import timezone
-from rest_framework.authtoken.models import Token
 
 from .models import RemoteDevice
 from .protocol import HTTP_ALPN, PAIR_ALPN, pairing_link  # noqa: F401
@@ -41,34 +40,31 @@ def claim_pairing(code: str) -> Optional[int]:
 
 
 def pair_device(endpoint_id: str, code: str, name: str) -> dict:
-    """Registers the device for the user who created the code. Returns the reply sent to the device."""
+    """Registers the device if the code was created by a staff user. Returns the reply sent to the device."""
     close_old_connections()
     user_id = claim_pairing(code) if isinstance(code, str) else None
-    user = get_user_model().objects.filter(pk=user_id, is_active=True).first() if user_id is not None else None
+    user = None
+    if user_id is not None:
+        user = get_user_model().objects.filter(pk=user_id, is_active=True, is_staff=True).first()
     if user is None:
         return {'ok': False, 'error': 'The pairing code is not valid or has expired.'}
-    name = (name if isinstance(name, str) else '').strip()[:100] or 'Device'
-    device = RemoteDevice.objects.filter(endpoint_id=endpoint_id).first()
-    if device is not None and device.user_id != user.pk:
-        return {'ok': False, 'error': 'This device is already paired with another account.'}
-    if device is None:
-        device = RemoteDevice(user=user, endpoint_id=endpoint_id)
-    device.name = name
+    device = RemoteDevice.objects.filter(endpoint_id=endpoint_id).first() or RemoteDevice(endpoint_id=endpoint_id)
+    device.name = (name if isinstance(name, str) else '').strip()[:100] or 'Device'
+    device.paired_by = user
     device.save()
-    return {'ok': True, 'user': user.get_username(), 'device': device.name}
+    return {'ok': True, 'device': device.name}
 
 
-def authorize_device(endpoint_id: str) -> Optional[str]:
-    """Returns the API token of the device's owner, or None when the device may not connect."""
+def authorize_device(endpoint_id: str) -> bool:
+    """Whether the device is paired. Records that it connected."""
     close_old_connections()
-    device = RemoteDevice.objects.select_related('user').filter(endpoint_id=endpoint_id).first()
-    if device is None or not device.user.is_active:
-        return None
+    device = RemoteDevice.objects.filter(endpoint_id=endpoint_id).first()
+    if device is None:
+        return False
     now = timezone.now()
     if device.last_seen is None or now - device.last_seen > LAST_SEEN_INTERVAL:
         RemoteDevice.objects.filter(pk=device.pk).update(last_seen=now)
-    token, _ = Token.objects.get_or_create(user=device.user)
-    return token.key
+    return True
 
 
 def publish_state(endpoint_id: str, ticket: str) -> None:

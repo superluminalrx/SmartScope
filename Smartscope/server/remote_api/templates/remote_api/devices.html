@@ -4,18 +4,14 @@
 <div class="d-flex flex-column p-3 w-100" style="background-color: #f5f5f5;">
     <div class="d-flex align-items-center gap-2 mb-2">
         <h2 class="flex-grow-1 mb-0">Remote devices</h2>
-        {% if request.user.is_staff %}
-        <a class="btn btn-sm btn-outline-secondary" href="{% url 'remoteDevices' %}{% if not show_all %}?all=1{% endif %}">
-            {% if show_all %}Show my devices{% else %}Show all users{% endif %}
-        </a>
-        {% endif %}
         <button id="remotePairButton" class="btn btn-sm btn-primary" {% if not online %}disabled{% endif %}>
             <i class="bi bi-plus-lg"></i> Add device
         </button>
     </div>
     <p class="text-muted mb-2">
-        Paired devices reach SmartScope from outside this network and act with your account.
-        Remove a device you no longer use or have lost.
+        A paired device can reach SmartScope from outside this network. Pairing only opens the connection:
+        whoever uses the device still signs in with their own account or API token.
+        Remove a device that is no longer used or has been lost.
     </p>
     {% if not online %}
     <div class="alert alert-warning py-2">The remote API listener is not running, so devices cannot connect or be added.</div>
@@ -41,8 +37,8 @@
         <thead>
             <tr>
                 <th>Name</th>
-                {% if show_all %}<th>User</th>{% endif %}
                 <th>Device key</th>
+                <th>Paired by</th>
                 <th>Added</th>
                 <th>Last connected</th>
                 <th></th>
@@ -52,8 +48,8 @@
             {% for device in devices %}
             <tr>
                 <td>{{ device.name }}</td>
-                {% if show_all %}<td>{{ device.user }}</td>{% endif %}
                 <td class="font-monospace" title="{{ device.endpoint_id }}">{{ device.short_id }}…</td>
+                <td>{{ device.paired_by|default:"" }}</td>
                 <td>{{ device.created|date:"Y-m-d H:i" }}</td>
                 <td>{% if device.last_seen %}{{ device.last_seen|date:"Y-m-d H:i" }}{% else %}Never{% endif %}</td>
                 <td class="text-end">

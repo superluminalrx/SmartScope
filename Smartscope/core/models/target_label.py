@@ -25,6 +25,14 @@ class TargetLabel(BaseModel):
         app_label = 'API'
         ordering = ['-created_at']
 
+    @property
+    def group(self):
+        # Used by HasGroupPermission; a label belongs to its target's session group.
+        target = self.content_object
+        if target is None:
+            return None
+        return target.group
+
 
 class Finder(TargetLabel):
     x = models.IntegerField()

@@ -2,7 +2,8 @@ from django.conf import settings
 from django.contrib.auth.models import User, Group
 from django.db import connection, reset_queries, transaction
 from django.template.response import SimpleTemplateResponse
-from django.http import FileResponse
+from django.http import FileResponse, Http404
+from django.shortcuts import get_object_or_404
 from django.template.loader import render_to_string
 from rest_framework import viewsets
 from rest_framework import permissions
@@ -21,7 +22,11 @@ from pathlib import Path
 import mrcfile
 
 from .serializers import *
-from Smartscope.server.api.permissions import HasGroupPermission
+from Smartscope.server.api.permissions import (
+    HasGroupPermission,
+    GroupScopedQuerysetMixin,
+    scope_target_labels_to_user_groups,
+)
 from Smartscope.server.frontend.forms import *
 
 from Smartscope.lib.converters import list_to_dict, get_request_param
@@ -59,7 +64,7 @@ class GeneralActionsMixin:
     def delete_many(self,request):
         logger.debug('Received delete_many request')
         logger.debug(request.data)
-        queryset = self.queryset.filter(pk__in=request.data)
+        queryset = self.get_queryset().filter(pk__in=request.data)
         logger.debug(queryset)
         queryset.delete()
         return Response(status=rest_status.HTTP_204_NO_CONTENT)
@@ -85,7 +90,7 @@ class GeneralActionsMixin:
 class ExtraActionsMixin:
 
     def load(self, request, **kwargs):
-        obj = self.queryset.filter(pk=kwargs['pk']).first()
+        obj = get_object_or_404(self.get_queryset(), pk=kwargs['pk'])
         serializer = SvgSerializer(instance=obj, context={'request': request})
         context = serializer.data
         return Response(serializer.data, template_name='mapcard.html')
@@ -109,7 +114,7 @@ class ExtraActionsMixin:
 
     def load_card(self, request, **kwargs):
         reset_queries()
-        obj = self.queryset.filter(pk=kwargs['pk']).first()
+        obj = get_object_or_404(self.get_queryset(), pk=kwargs['pk'])
         context = self.get_card_context(obj, request)
         serializer = SvgSerializer(instance=obj, display_type=context['display_type'], method=context['method'])
         context = {**context, **serializer.data}
@@ -243,7 +248,7 @@ class TargetRouteMixin:
         logger.debug(request.data)
         data = request.data.copy()
         uids = data.pop('uids')
-        objs = self.queryset.filter(pk__in=uids)
+        objs = self.get_queryset().filter(pk__in=uids)
         try:
             with transaction.atomic():
                 for obj in objs:
@@ -306,13 +311,14 @@ class GridCollectionParamsViewSet(viewsets.ModelViewSet, GeneralActionsMixin,):
     serializer_class = GridCollectionParamsSerializer
     permission_classes = [permissions.IsAuthenticated]
 
-class ScreeningSessionsViewSet(viewsets.ModelViewSet, GeneralActionsMixin,):
+class ScreeningSessionsViewSet(GroupScopedQuerysetMixin, viewsets.ModelViewSet, GeneralActionsMixin,):
     """
     API endpoint that allows ScreeningSessions to be viewed or edited.
     """
     queryset = ScreeningSession.objects.all()
     serializer_class = SessionSerializer
     permission_classes = [permissions.IsAuthenticated, HasGroupPermission]
+    group_lookup = 'group'
 
     filterset_fields = ['session', 'group', 'date', 'microscope_id', 'detector_id']
 
@@ -545,13 +551,14 @@ def get_queue(grid):
         order_by('square_id__completion_time', 'number').first()
     return square, hole
 
-class AutoloaderGridViewSet(viewsets.ModelViewSet, GeneralActionsMixin, ExtraActionsMixin):
+class AutoloaderGridViewSet(GroupScopedQuerysetMixin, viewsets.ModelViewSet, GeneralActionsMixin, ExtraActionsMixin):
     """
     API endpoint that allows Grids to be viewed or edited.
     """
     queryset = AutoloaderGrid.objects.all()
     serializer_class = AutoloaderGridSerializer
     permission_classes = [permissions.IsAuthenticated, HasGroupPermission]
+    group_lookup = 'session_id__group'
     filterset_fields = ('session_id', 'holeType', 'meshSize', 'meshMaterial', 'quality', 'status')
 
     @ action(detail=True, methods=['get'])
@@ -684,14 +691,15 @@ class AutoloaderGridViewSet(viewsets.ModelViewSet, GeneralActionsMixin, ExtraAct
         return Response(url)
 
 
-class AtlasModelViewSet(viewsets.ModelViewSet, GeneralActionsMixin, ExtraActionsMixin, TargetRouteMixin):
+class AtlasModelViewSet(GroupScopedQuerysetMixin, viewsets.ModelViewSet, GeneralActionsMixin, ExtraActionsMixin, TargetRouteMixin):
     """
     API endpoint that allows Atlases to be viewed or edited.
     """
     queryset = AtlasModel.objects.all()
     serializer_class = AtlasSerializer
     detailed_serializer = DetailedFullAtlasSerializer
-    permission_classes = [permissions.IsAuthenticated]
+    permission_classes = [permissions.IsAuthenticated, HasGroupPermission]
+    group_lookup = 'grid_id__session_id__group'
     filterset_fields = ['grid_id', 'grid_id__meshMaterial', 'grid_id__holeType',
                         'grid_id__meshSize', 'grid_id__quality', 'grid_id__session_id', 'status']
 
@@ -700,13 +708,14 @@ class AtlasModelViewSet(viewsets.ModelViewSet, GeneralActionsMixin, ExtraActions
         return super().load_card(request, **kwargs)
 
 
-class SquareModelViewSet(viewsets.ModelViewSet, GeneralActionsMixin, ExtraActionsMixin, TargetRouteMixin):
+class SquareModelViewSet(GroupScopedQuerysetMixin, viewsets.ModelViewSet, GeneralActionsMixin, ExtraActionsMixin, TargetRouteMixin):
     """
     API endpoint that allows Squares to be viewed or edited.
     """
     queryset = SquareModel.objects.all()
     serializer_class = SquareSerializer
     permission_classes = [permissions.IsAuthenticated, HasGroupPermission]
+    group_lookup = 'grid_id__session_id__group'
     filterset_fields = ['grid_id', 'grid_id__meshMaterial', 'grid_id__holeType', 'grid_id__meshSize', 'grid_id__quality',
                         'atlas_id', 'selected', 'grid_id__session_id', 'status']
     detailed_serializer = DetailedFullSquareSerializer
@@ -783,13 +792,14 @@ class SquareModelViewSet(viewsets.ModelViewSet, GeneralActionsMixin, ExtraAction
 
 
 
-class HoleModelViewSet(viewsets.ModelViewSet, GeneralActionsMixin, ExtraActionsMixin, TargetRouteMixin):
+class HoleModelViewSet(GroupScopedQuerysetMixin, viewsets.ModelViewSet, GeneralActionsMixin, ExtraActionsMixin, TargetRouteMixin):
     """
     API endpoint that allows Squares to be viewed or edited.
     """
     queryset = HoleModel.objects.all()
     serializer_class = HoleSerializer
     permission_classes = [permissions.IsAuthenticated, HasGroupPermission]
+    group_lookup = 'grid_id__session_id__group'
     filterset_fields = ['grid_id', 'grid_id__meshMaterial', 'grid_id__holeType', 'grid_id__meshSize', 'grid_id__quality', 'grid_id__session_id',
                         'square_id', 'status', 'bis_group', 'bis_type']
 
@@ -848,18 +858,19 @@ class HoleModelViewSet(viewsets.ModelViewSet, GeneralActionsMixin, ExtraActionsM
         if grid_id:
             extra_filters = dict(grid_id=grid_id)
         self.serializer_class = DetailedHoleSerializer
-        count = HoleModel.objects.filter(status='completed', quality__isnull=True, **extra_filters).count()
-        self.queryset = HoleModel.objects.filter(status='completed', quality__isnull=True, **extra_filters).order_by('?')[: numToLoad]
-        serializer = self.get_serializer(self.get_queryset(), many=True)
+        queryset = self.get_queryset().filter(status='completed', quality__isnull=True, **extra_filters)
+        count = queryset.count()
+        serializer = self.get_serializer(queryset.order_by('?')[: numToLoad], many=True)
         return Response(dict(data=serializer.data, count=count))
 
 
-class HighMagModelViewSet(viewsets.ModelViewSet, GeneralActionsMixin, ExtraActionsMixin, TargetRouteMixin):
+class HighMagModelViewSet(GroupScopedQuerysetMixin, viewsets.ModelViewSet, GeneralActionsMixin, ExtraActionsMixin, TargetRouteMixin):
     """
     API endpoint that allows Atlases to be viewed or edited.
     """
     queryset = HighMagModel.objects.all()
     permission_classes = [permissions.IsAuthenticated, HasGroupPermission]
+    group_lookup = 'grid_id__session_id__group'
     serializer_class = HighMagSerializer
     filterset_fields = ['grid_id', 'grid_id__meshMaterial', 'grid_id__holeType', 'grid_id__meshSize',
                         'grid_id__quality', 'hole_id', 'hole_id__square_id', 'grid_id__session_id', 'hm_id', 'number', 'status','name','frames']
@@ -933,4 +944,7 @@ class ClassifierViewSet(viewsets.ModelViewSet):
     serializer_class = ClassifierSerializer
     filterset_fields = ['object_id','method_name','content_type']
 
-    detailed_serializer = DetailedHighMagSerializer 
+    detailed_serializer = DetailedHighMagSerializer
+
+    def get_queryset(self):
+        return scope_target_labels_to_user_groups(super().get_queryset(), self.request.user)
